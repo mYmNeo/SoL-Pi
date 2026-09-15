@@ -6,9 +6,9 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ToolResultMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { afterEach, describe, expect, it, mock, spyOn, vi } from "bun:test";
 import {
 	createObservationPackExtension,
 	FULL_SENDS,
@@ -85,7 +85,7 @@ async function project(pi: FakePi, message: ToolResultMessage, sessionDir: strin
 
 function captureConsoleErrors(): string[] {
 	const errors: string[] = [];
-	vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => {
+	spyOn(console, "error").mockImplementation((...values: unknown[]) => {
 		errors.push(values.map(String).join(" "));
 	});
 	return errors;
@@ -101,7 +101,7 @@ describe("observation pack", () => {
 	it("renders observation recall as an English lightning savings call", () => {
 		const recall = observationPackPi().tool("obs_recall");
 		const args = { id: "obs_0123456789abcdef01234567", offset: 0 };
-		const rendered = recall.renderCall!(args, plainTheme, { args, cwd: process.cwd() } as never);
+		const rendered = recall.renderCall!(args, { expanded: false, isPartial: false } as never, plainTheme);
 
 		expect(componentText(rendered)).toContain("⚡ SoL-Pi · Observation Pack");
 		expect(componentText(rendered)).toContain("Money saved");
@@ -134,8 +134,8 @@ describe("observation pack", () => {
 		const body = `head line\n${repeatPastThreshold("middle line\n")}tail line\n`;
 		const message = toolResult(body);
 		const pi = observationPackPi();
-		const notify = vi.fn();
-		const setStatus = vi.fn();
+		const notify = mock();
+		const setStatus = mock();
 		const context = fakeContext(sessionDir, {
 			mode: "tui",
 			hasUI: true,

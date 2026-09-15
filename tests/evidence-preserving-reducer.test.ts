@@ -7,9 +7,10 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
-import type { AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Context, Model, StopReason } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import type { ExtensionContext, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
+import { afterEach, describe, expect, it, mock, vi } from "bun:test";
 import {
 	createEvidencePreservingReducerExtension,
 	DIAGNOSTIC_COMMAND,
@@ -17,46 +18,37 @@ import {
 	REDUCER_RECEIPT_SCHEMA,
 } from "../src/sol-pi/extensions/evidence-preserving-reducer/index.ts";
 import { archiveBody } from "../src/sol-pi/extensions/evidence-preserving-reducer/archive.ts";
-import {
-	callReducer,
-	type CompatComplete,
-} from "../src/sol-pi/extensions/evidence-preserving-reducer/provider.ts";
+import { callReducer } from "../src/sol-pi/extensions/evidence-preserving-reducer/provider.ts";
 import { runtimeRoot } from "../src/sol-pi/runtime-paths.ts";
 import { FakePi, FakeSessionManager, fakeContext } from "./helpers.ts";
 
 const cleanupPaths: string[] = [];
 
-const ACTIVE_MODEL = {
+// The reducer's completion seam is omp's real `complete`, which dispatches on
+// the model's `api`. Registering the mock provider here is what lets the tests
+// drive that module-level import instead of injecting a completion function the
+// extension factory path never accepts.
+registerMockApi();
+
+const ACTIVE_MODEL = createMockModel({
 	id: ["gpt-5.6", "sol"].join("-"),
-	name: "GPT-5.6 SoL",
-	api: "openai-responses",
 	provider: "openai-codex",
 	baseUrl: "https://example.invalid/v1",
 	reasoning: true,
-	input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 200_000,
 	maxTokens: 16_384,
-} satisfies Model<"openai-responses">;
+});
 
-const REDUCER_MODEL = {
+const REDUCER_MODEL = createMockModel({
 	id: ["gpt-5.6", "luna"].join("-"),
-	name: "GPT-5.6 Luna",
-	api: "openai-responses",
 	provider: "openai-codex",
 	baseUrl: "https://example.invalid/v1",
 	reasoning: true,
-	input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 32_768,
 	maxTokens: 4_096,
-} satisfies Model<"openai-responses">;
-
-type Complete = (
-	model: Model<string>,
-	context: Context,
-	options?: Record<string, unknown>,
-) => Promise<AssistantMessage>;
+});
 
 interface ModelReceipt {
 	schema: string;
@@ -72,10 +64,67 @@ interface CapturedCall {
 	readonly options: Record<string, unknown>;
 }
 
+type ReducerAuth =
+	| {
+			readonly ok: true;
+			readonly apiKey?: string;
+			readonly headers?: Record<string, string>;
+			readonly env?: Record<string, string>;
+		}
+	| { readonly ok: false; readonly error: string };
+
 afterEach(async () => {
 	vi.useRealTimers();
+	// `reset()` clears recorded calls but deliberately leaves the fallback in
+	// place, so clear it too: a scripted response must never leak into the next test.
+	REDUCER_MODEL.reset();
+	REDUCER_MODEL.fallback = undefined;
 	await Promise.all(cleanupPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
+
+/**
+ * The reducer resolves its model and its credentials through the host registry,
+ * so the registry is the only place a test can steer routing and auth. `find`
+ * defaults to serving `REDUCER_MODEL`; `getApiKeyAndHeaders` defaults to a bare
+ * success, which is what an unauthenticated route looks like on omp.
+ */
+function reducerRegistry(
+	options: {
+		auth?: ReducerAuth;
+		find?: (provider: string, modelId: string) => Model<string> | undefined;
+		onAuth?: (model: Model<string>) => void;
+	} = {},
+): ExtensionContext["modelRegistry"] {
+	return {
+		find:
+			options.find ??
+			((provider: string, modelId: string) =>
+				provider === REDUCER_MODEL.provider && modelId === REDUCER_MODEL.id ? REDUCER_MODEL : undefined),
+		getApiKeyAndHeaders: async (model: Model<string>) => {
+			options.onAuth?.(model);
+			return options.auth ?? { ok: true };
+		},
+	} as unknown as ExtensionContext["modelRegistry"];
+}
+
+/**
+ * The call the reducer actually placed, read off the model the host's `complete`
+ * dispatched to. `streamMock` records the context and the exact option bag.
+ */
+function capturedModelCall(model: MockModel): CapturedCall | undefined {
+	const call = model.calls[0];
+	if (!call) return undefined;
+	// The mock stores the host's own `SimpleStreamOptions`; read it as a plain record
+	// so an assertion can probe the individual fields the reducer forwarded.
+	const options = (call.options ?? {}) as unknown as Record<string, unknown>;
+	return { context: call.context, model, options };
+}
+
+/** The request's abort signal, narrowed rather than asserted. */
+function signalOf(call: CapturedCall | undefined): AbortSignal | undefined {
+	const signal = call?.options.signal;
+	return signal instanceof AbortSignal ? signal : undefined;
+}
 
 async function storeRoot(): Promise<string> {
 	const value = await mkdtemp(join(tmpdir(), "evidence-preserving-reducer-test-"));
@@ -128,22 +177,23 @@ function sourceHash(input: string): string {
 	return match[1];
 }
 
-function modelComplete(
+/**
+ * Script the reducer model's next response.
+ *
+ * The receipt is built from the request the reducer actually sent, so every
+ * assertion downstream still proves the reducer's request carried the archive
+ * hash, the untrusted log, and the instruction text.
+ */
+function scriptReducer(
 	body: string,
 	receiptFactory: (input: string) => ModelReceipt,
-	stopReason: AssistantMessage["stopReason"] = "stop",
-	onCall?: (call: CapturedCall) => void,
-): Complete {
-	return async (model, context, options = {}) => {
-		onCall?.({ model, context, options });
+	stopReason: StopReason = "stop",
+): void {
+	REDUCER_MODEL.fallback = (context) => {
 		const input = contextInput(context);
 		const receipt = receiptFactory(input);
 		return {
-			role: "assistant",
 			content: stopReason === "error" ? [] : [{ type: "text", text: JSON.stringify(receipt) }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
 			usage: {
 				input: Math.ceil(body.length / 4),
 				output: 90,
@@ -154,14 +204,19 @@ function modelComplete(
 			},
 			stopReason,
 			...(stopReason === "error" ? { errorMessage: "model call failed" } : {}),
-			timestamp: Date.now(),
 		};
+	};
+}
+
+/** Script the reducer model to reject, as an unreachable provider or bad credential does. */
+function scriptReducerFailure(error: unknown): void {
+	REDUCER_MODEL.fallback = () => {
+		throw error;
 	};
 }
 
 function load(
 	root: string,
-	complete: Complete,
 	model: Model<string> | null = ACTIVE_MODEL,
 	overrides: Partial<ExtensionContext> = {},
 ): { context: ExtensionContext; manager: FakeSessionManager; pi: FakePi } {
@@ -170,11 +225,7 @@ function load(
 	createEvidencePreservingReducerExtension()(pi.asExtensionApi());
 	const context = fakeContext(manager, {
 		model: model ?? undefined,
-		modelRegistry: {
-			find: (provider: string, modelId: string) =>
-				provider === REDUCER_MODEL.provider && modelId === REDUCER_MODEL.id ? REDUCER_MODEL : undefined,
-			complete,
-		} as unknown as ExtensionContext["modelRegistry"],
+		modelRegistry: reducerRegistry(),
 		...overrides,
 	});
 	return { context, manager, pi };
@@ -191,16 +242,14 @@ describe("evidence-preserving reducer", () => {
 		const root = await storeRoot();
 		const signal = "ERROR test target failed";
 		const body = `${signal}\n${"diagnostic output\n".repeat(400)}`;
-		const { context, manager, pi } = load(
-			root,
-			modelComplete(body, (input) => ({
+		scriptReducer(body, (input) => ({
 				schema: REDUCER_RECEIPT_SCHEMA,
 				source_sha256: sourceHash(input),
 				status: "failure",
 				uncertain: false,
 				evidence: [{ kind: "failure", quote: signal }],
-			})),
-		);
+		}));
+		const { context, manager, pi } = load(root);
 
 		const result = (await pi.emit("tool_result", bashEvent(body), context)) as {
 			content: { type: string; text: string }[];
@@ -243,14 +292,9 @@ describe("evidence-preserving reducer", () => {
 		const body = ["pytest session starts", fatal, "FAILED tests/test_math.py::test_addition", ".".repeat(6000)].join(
 			"\n",
 		);
-		let call: CapturedCall | undefined;
-		const notify = vi.fn();
-		const setStatus = vi.fn();
-		const { context, manager, pi } = load(
-			root,
-			modelComplete(
-				body,
-				(input) => ({
+		const notify = mock();
+		const setStatus = mock();
+		scriptReducer(body, (input) => ({
 					schema: REDUCER_RECEIPT_SCHEMA,
 					source_sha256: sourceHash(input),
 					status: "failure",
@@ -259,25 +303,27 @@ describe("evidence-preserving reducer", () => {
 						{ kind: "failure", quote: fatal },
 						{ kind: "target", quote: "FAILED tests/test_math.py::test_addition" },
 					],
-				}),
-				"stop",
-				(value) => {
-					call = value;
-				},
-			),
-			ACTIVE_MODEL,
-			{ mode: "tui", hasUI: true, ui: { notify, setStatus } as never },
-		);
+		}));
+		const { context, manager, pi } = load(root, ACTIVE_MODEL, {
+			mode: "tui",
+			hasUI: true,
+			ui: { notify, setStatus } as never,
+		});
 
 		const result = (await pi.emit("tool_result", bashEvent(body), context)) as {
 			content: { type: string; text: string }[];
 		};
 
+		const call = capturedModelCall(REDUCER_MODEL);
 		expect(call?.model).toBe(REDUCER_MODEL);
-		expect(call?.context.systemPrompt).toContain("lossless test/build output reducer");
+		expect(call?.context.systemPrompt?.join("\n")).toContain("lossless test/build output reducer");
 		expect(contextInput(call!.context)).toContain("<untrusted_log>");
-		expect(call?.options).toMatchObject({ cacheRetention: "none", maxTokens: 2_048, timeoutMs: 90_000 });
-		expect(call?.options.signal).toBeInstanceOf(AbortSignal);
+		// omp's stream options carry no total request deadline, so the reducer budget
+		// is enforced by the abort signal the port arms instead of a `timeoutMs` field.
+		expect(call?.options).toMatchObject({ cacheRetention: "none", maxTokens: 2_048 });
+		expect(call?.options).not.toHaveProperty("timeoutMs");
+		expect(signalOf(call)).toBeInstanceOf(AbortSignal);
+		expect(signalOf(call)?.aborted).toBe(false);
 		const receipt = result.content[0]?.text ?? "";
 		expect(receipt).toMatch(/status=failure/u);
 		expect(receipt).toMatch(/line=2/u);
@@ -301,55 +347,90 @@ describe("evidence-preserving reducer", () => {
 		);
 	});
 
-	it("uses Pi-resolved authentication on a fork-shaped model registry", async () => {
+	it("forwards host-resolved authentication onto the reducer request", async () => {
 		const root = await storeRoot();
 		const config = loadReducerConfig(join(root, "session-runtime"));
-		const body = `ERROR fork compatibility\n${"diagnostic\n".repeat(400)}`;
+		const body = `ERROR auth forwarding\n${"diagnostic\n".repeat(400)}`;
 		const archive = await archiveBody(config.storeRoot, body);
-		let call: CapturedCall | undefined;
-		const completion = modelComplete(
-			body,
-			(input) => ({
+		scriptReducer(body, (input) => ({
 				schema: REDUCER_RECEIPT_SCHEMA,
 				source_sha256: sourceHash(input),
 				status: "failure",
 				uncertain: false,
-				evidence: [{ kind: "failure", quote: "ERROR fork compatibility" }],
-			}),
-			"stop",
-			(value) => {
-				call = value;
-			},
-		) as CompatComplete;
-		let authModel: Model<string> | undefined;
-		const context = fakeContext(new FakeSessionManager([], "fork-session", root), {
+			evidence: [{ kind: "failure", quote: "ERROR auth forwarding" }],
+		}));
+		const authModels: Model<string>[] = [];
+		const context = fakeContext(new FakeSessionManager([], "auth-session", root), {
 			model: ACTIVE_MODEL,
-			modelRegistry: {
-				find: (provider: string, modelId: string) =>
-					provider === REDUCER_MODEL.provider && modelId === REDUCER_MODEL.id ? REDUCER_MODEL : undefined,
-				getApiKeyAndHeaders: async (model: Model<string>) => {
-					authModel = model;
-					return {
+			modelRegistry: reducerRegistry({
+				auth: {
 					ok: true,
-					apiKey: "fork-test-key",
-					headers: { "x-test-header": "fork" },
+					apiKey: "host-test-key",
+					headers: { "x-test-header": "host" },
 					env: { TEST_REGION: "test" },
-					baseUrl: "https://fork.example.invalid/v1",
-					};
 				},
-			} as unknown as ExtensionContext["modelRegistry"],
+				onAuth: (model) => authModels.push(model),
+			}),
 		});
 
-		const result = await callReducer(config, "pytest -q", true, archive, body, context, completion);
+		const result = await callReducer(config, "pytest -q", true, archive, body, context);
 
 		expect(result.ok).toBe(true);
-		expect(authModel).toBe(REDUCER_MODEL);
-		expect(call?.model.baseUrl).toBe("https://fork.example.invalid/v1");
+		// Auth is resolved for the reducer model the registry returned, never for the
+		// session's active model: the reducer never carries its own credentials.
+		expect(authModels).toEqual([REDUCER_MODEL]);
+		const call = capturedModelCall(REDUCER_MODEL);
+		expect(call?.model).toBe(REDUCER_MODEL);
 		expect(call?.options).toMatchObject({
-			apiKey: "fork-test-key",
-			headers: { "x-test-header": "fork" },
+			apiKey: "host-test-key",
+			headers: { "x-test-header": "host" },
 			env: { TEST_REGION: "test" },
 		});
+	});
+
+	it("omits unset authentication rather than forwarding nulls", async () => {
+		const root = await storeRoot();
+		const config = loadReducerConfig(join(root, "session-runtime"));
+		const body = `ERROR no credentials\n${"diagnostic\n".repeat(400)}`;
+		const archive = await archiveBody(config.storeRoot, body);
+		scriptReducer(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA,
+			source_sha256: sourceHash(input),
+			status: "failure",
+			uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR no credentials" }],
+		}));
+		const context = fakeContext(new FakeSessionManager([], "auth-empty-session", root), {
+			model: ACTIVE_MODEL,
+			modelRegistry: reducerRegistry({ auth: { ok: true } }),
+		});
+
+		const result = await callReducer(config, "pytest -q", true, archive, body, context);
+
+		expect(result.ok).toBe(true);
+		const options = capturedModelCall(REDUCER_MODEL)?.options ?? {};
+		expect(options).not.toHaveProperty("apiKey");
+		expect(options).not.toHaveProperty("headers");
+		expect(options).not.toHaveProperty("env");
+	});
+
+	it("propagates a host authentication failure instead of calling the model", async () => {
+		const root = await storeRoot();
+		const config = loadReducerConfig(join(root, "session-runtime"));
+		const body = `ERROR auth failure\n${"diagnostic\n".repeat(400)}`;
+		const archive = await archiveBody(config.storeRoot, body);
+		REDUCER_MODEL.fallback = () => {
+			throw new Error("unexpected model call");
+		};
+		const context = fakeContext(new FakeSessionManager([], "auth-fail-session", root), {
+			model: ACTIVE_MODEL,
+			modelRegistry: reducerRegistry({ auth: { ok: false, error: "no credential for openai-codex" } }),
+		});
+
+		await expect(callReducer(config, "pytest -q", true, archive, body, context)).rejects.toThrow(
+			"no credential for openai-codex",
+		);
+		expect(REDUCER_MODEL.calls).toHaveLength(0);
 	});
 
 	it.each([false, true])(
@@ -358,16 +439,14 @@ describe("evidence-preserving reducer", () => {
 			const root = await storeRoot();
 			const signal = failed ? "ERROR test target failed" : "PASS test target completed";
 			const body = `${signal}\n${"diagnostic output\n".repeat(400)}`;
-			const { context, manager, pi } = load(
-				root,
-				modelComplete(body, (input) => ({
+			scriptReducer(body, (input) => ({
 					schema: REDUCER_RECEIPT_SCHEMA,
 					source_sha256: sourceHash(input),
 					status: failed ? "failure" : "success",
 					uncertain: false,
 					evidence: [{ kind: failed ? "failure" : "summary", quote: signal }],
-				})),
-			);
+			}));
+			const { context, manager, pi } = load(root);
 
 			const result = (await pi.emit("tool_result", fusedEvent(body, failed), context)) as {
 				content: Array<{ type: string; text?: string }>;
@@ -390,9 +469,7 @@ describe("evidence-preserving reducer", () => {
 	it.each(["invented", "model-error"] as const)("fails open on %s", async (mode) => {
 		const root = await storeRoot();
 		const body = `ERROR real failure\n${"x".repeat(5000)}`;
-		const { context, manager, pi } = load(
-			root,
-			modelComplete(
+		scriptReducer(
 				body,
 				(input) => ({
 					schema: REDUCER_RECEIPT_SCHEMA,
@@ -402,8 +479,8 @@ describe("evidence-preserving reducer", () => {
 					evidence: [{ kind: "failure", quote: "ERROR invented failure" }],
 				}),
 				mode === "model-error" ? "error" : "stop",
-			),
 		);
+		const { context, manager, pi } = load(root);
 
 		const result = await pi.emit("tool_result", bashEvent(body), context);
 
@@ -418,12 +495,11 @@ describe("evidence-preserving reducer", () => {
 		).toBe(true);
 	});
 
-	it("fails open when Pi cannot complete the nested model call", async () => {
+	it("fails open when the nested model call throws", async () => {
 		const root = await storeRoot();
 		const body = `ERROR real failure\n${"x".repeat(5000)}`;
-		const { context, manager, pi } = load(root, async () => {
-			throw new Error("authentication is not configured");
-		});
+		scriptReducerFailure(new Error("authentication is not configured"));
+		const { context, manager, pi } = load(root);
 
 		expect(await pi.emit("tool_result", bashEvent(body), context)).toBeUndefined();
 		expect(manager.customEntryData()).toContainEqual(
@@ -435,23 +511,13 @@ describe("evidence-preserving reducer", () => {
 		const root = await storeRoot();
 		const body = `ERROR real failure\n${"x".repeat(5000)}`;
 		let calls = 0;
-		const { context, manager, pi } = load(
-			root,
-			async () => {
+		REDUCER_MODEL.fallback = () => {
 				calls++;
 				throw new Error("unexpected model call");
-			},
-			ACTIVE_MODEL,
-			{
-				modelRegistry: {
-					find: () => undefined,
-					complete: async () => {
-						calls++;
-						throw new Error("unexpected model call");
-					},
-				} as unknown as ExtensionContext["modelRegistry"],
-			},
-		);
+		};
+		const { context, manager, pi } = load(root, ACTIVE_MODEL, {
+			modelRegistry: reducerRegistry({ find: () => undefined }),
+		});
 
 		expect(await pi.emit("tool_result", bashEvent(body), context)).toBeUndefined();
 		expect(calls).toBe(0);
@@ -460,24 +526,21 @@ describe("evidence-preserving reducer", () => {
 		);
 	});
 
-	it("fails open when Pi has no persistent session directory", async () => {
+	it("fails open when the session has no persistent directory", async () => {
 		const manager = new FakeSessionManager([], "ephemeral-session", "");
 		const pi = new FakePi(manager);
 		createEvidencePreservingReducerExtension()(pi.asExtensionApi());
 		let calls = 0;
-		const context = fakeContext(manager, {
-			model: ACTIVE_MODEL,
-			modelRegistry: {
-				complete: async () => {
+		REDUCER_MODEL.fallback = () => {
 					calls++;
 					throw new Error("unexpected model call");
-				},
-			} as unknown as ExtensionContext["modelRegistry"],
-		});
+		};
+		const context = fakeContext(manager, { model: ACTIVE_MODEL, modelRegistry: reducerRegistry() });
 		const body = `ERROR no session storage\n${"x".repeat(5000)}`;
 
 		expect(await pi.emit("tool_result", bashEvent(body), context)).toBeUndefined();
 		expect(calls).toBe(0);
+		expect(manager.customEntryData()).toEqual([]);
 	});
 
 	it("reads only Pi output files in the system temporary directory", async () => {
@@ -486,11 +549,10 @@ describe("evidence-preserving reducer", () => {
 		const outputPath = join(tmpdir(), `pi-bash-${randomUUID()}.log`);
 		await writeFile(outputPath, fullBody, { mode: 0o600 });
 		cleanupPaths.push(outputPath);
-		let input = "";
-		const { context, manager, pi } = load(
-			root,
-			modelComplete(fullBody, (value) => {
-				input = value;
+		// Capturing inside the receipt factory records the exact request the reducer sent.
+		const inputs: string[] = [];
+		scriptReducer(fullBody, (value) => {
+			inputs.push(value);
 				return {
 					schema: REDUCER_RECEIPT_SCHEMA,
 					source_sha256: sourceHash(value),
@@ -498,38 +560,66 @@ describe("evidence-preserving reducer", () => {
 					uncertain: false,
 					evidence: [{ kind: "failure", quote: "ERROR full output" }],
 				};
-			}),
-		);
+		});
+		const { context, manager, pi } = load(root);
 
 		await pi.emit(
 			"tool_result",
 			bashEvent("ERROR truncated", { details: { fullOutputPath: outputPath } }),
 			context,
 		);
-		expect(input).toContain(fullBody);
+		expect(inputs[0]).toContain(fullBody);
 		const candidate = manager.customEntryData().find((entry) => entry.kind === "candidate");
 		expect(await readFile(String(candidate?.sourcePath), "utf8")).toBe(fullBody);
 
 		const outsidePath = join(root, `pi-bash-${randomUUID()}.log`);
 		await writeFile(outsidePath, `ERROR outside file\n${"outside\n".repeat(600)}`);
 		const inlineBody = `ERROR inline output\n${"inline diagnostic\n".repeat(400)}`;
-		input = "";
+		inputs.length = 0;
 		await pi.emit(
 			"tool_result",
 			bashEvent(inlineBody, { toolCallId: "call-2", details: { fullOutputPath: outsidePath } }),
 			context,
 		);
-		expect(input).toContain(inlineBody);
-		expect(input).not.toContain("ERROR outside file");
+		expect(inputs[0]).toContain(inlineBody);
+		expect(inputs[0]).not.toContain("ERROR outside file");
+	});
+
+	it("enforces the reducer budget through the request abort signal", async () => {
+		const root = await storeRoot();
+		const config = { ...loadReducerConfig(join(root, "session-runtime")), timeoutMs: 60 };
+		const body = `ERROR stalled reducer\n${"diagnostic\n".repeat(400)}`;
+		const archive = await archiveBody(config.storeRoot, body);
+		REDUCER_MODEL.fallback = (_context, options) => {
+			const { promise, reject } = Promise.withResolvers<never>();
+			const signal = options?.signal;
+			if (signal?.aborted) {
+				reject(signal.reason);
+				return promise;
+			}
+			signal?.addEventListener("abort", () => reject(signal?.reason), { once: true });
+			return promise;
+		};
+		const context = fakeContext(new FakeSessionManager([], "timeout-session", root), {
+			model: ACTIVE_MODEL,
+			modelRegistry: reducerRegistry(),
+		});
+
+		await expect(callReducer(config, "pytest -q", true, archive, body, context)).rejects.toMatchObject({
+			name: "AbortError",
+		});
+		// The signal the reducer handed the provider is what enforced the deadline.
+		expect(signalOf(capturedModelCall(REDUCER_MODEL))?.aborted).toBe(true);
 	});
 
 	it("does not delegate small or non-diagnostic output", async () => {
 		const root = await storeRoot();
 		let calls = 0;
-		const { context, manager, pi } = load(root, async () => {
+		REDUCER_MODEL.fallback = () => {
 			calls++;
 			throw new Error("unexpected model call");
-		});
+		};
+		const { context, pi } = load(root);
 
 		expect(await pi.emit("tool_result", bashEvent("ERROR short"), context)).toBeUndefined();
 		expect(

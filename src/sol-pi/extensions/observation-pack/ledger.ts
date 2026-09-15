@@ -8,7 +8,7 @@ import { dirname } from "node:path";
 /**
  * Append-only JSONL record of what the mechanism did on each provider request.
  *
- * The caller derives the ledger path from the active Pi session.
+ * The caller derives the ledger path from the active session.
  */
 export type Ledger = (entry: Record<string, unknown>) => Promise<void>;
 

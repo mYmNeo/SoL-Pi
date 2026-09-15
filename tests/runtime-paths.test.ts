@@ -4,8 +4,8 @@
  */
 
 import { join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { describe, expect, it } from "bun:test";
 import { runtimeRoot } from "../src/sol-pi/runtime-paths.ts";
 
 function context(sessionDir: string, sessionId: string): ExtensionContext {
@@ -27,7 +27,7 @@ describe("SoL-Pi runtime root", () => {
 	it.each(["", ".", "..", "../escape", "nested/session", "nested\\session"])(
 		"rejects unsafe session id %j",
 		(sessionId) => {
-			expect(() => runtimeRoot(context("sessions", sessionId))).toThrow("safe Pi session id");
+			expect(() => runtimeRoot(context("sessions", sessionId))).toThrow("safe session id");
 		},
 	);
 });

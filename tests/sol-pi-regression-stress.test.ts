@@ -6,9 +6,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import type { Context, Model } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import type { ExtensionContext, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
+import { describe, expect, it } from "bun:test";
 import { archiveBody } from "../src/sol-pi/extensions/evidence-preserving-reducer/archive.ts";
 import {
 	createEvidencePreservingReducerExtension,
@@ -21,37 +22,27 @@ import {
 } from "../src/sol-pi/extensions/evidence-preserving-reducer/provider.ts";
 import { FakePi, FakeSessionManager, fakeContext } from "./helpers.ts";
 
-const ACTIVE_MODEL = {
+const ACTIVE_MODEL = createMockModel({
 	id: ["gpt-5.6", "sol"].join("-"),
-	name: "GPT-5.6 SoL",
-	api: "openai-responses",
 	provider: "openai-codex",
 	baseUrl: "https://example.invalid/v1",
 	reasoning: true,
-	input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 200_000,
 	maxTokens: 16_384,
-} satisfies Model<"openai-responses">;
+});
 
-const REDUCER_MODEL = {
+const REDUCER_MODEL = createMockModel({
 	id: ["gpt-5.6", "luna"].join("-"),
-	name: "GPT-5.6 Luna",
-	api: "openai-responses",
 	provider: "openai-codex",
 	baseUrl: "https://example.invalid/v1",
 	reasoning: true,
-	input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 32_768,
 	maxTokens: 4_096,
-} satisfies Model<"openai-responses">;
+});
 
-type Complete = (
-	model: Model<string>,
-	context: Context,
-	options?: Record<string, unknown>,
-) => Promise<AssistantMessage>;
+type Complete = CompatComplete;
 
 interface CapturedCall {
 	readonly model: Model<string>;
@@ -133,9 +124,10 @@ describe("SoL-Pi regression stress", () => {
 					modelRegistry: {
 						find: (provider: string, modelId: string) =>
 							provider === REDUCER_MODEL.provider && modelId === REDUCER_MODEL.id ? REDUCER_MODEL : undefined,
+						// omp's auth contract: no `baseUrl`, and headers arrive null-free.
 						getApiKeyAndHeaders: async (model: Model<string>) => {
 							authModel = model;
-							return { ok: true, apiKey: "test-key", headers: {}, env: {}, baseUrl: "https://stress.invalid/v1" };
+							return { ok: true, apiKey: "test-key", headers: {}, env: {} };
 						},
 					} as unknown as ExtensionContext["modelRegistry"],
 				});
@@ -149,14 +141,23 @@ describe("SoL-Pi regression stress", () => {
 					context,
 					reducerComplete((value) => {
 						call = value;
-					}) as CompatComplete,
+					}),
 				);
 
 				expect(result.ok).toBe(true);
 				expect(authModel).toBe(REDUCER_MODEL);
 				expect(call?.model).toMatchObject({ provider: REDUCER_MODEL.provider, id: REDUCER_MODEL.id });
 				expect(call?.model).not.toMatchObject({ provider: ACTIVE_MODEL.provider, id: ACTIVE_MODEL.id });
-				expect(call?.options).toMatchObject({ cacheRetention: "none", maxTokens: 2_048, timeoutMs: 90_000 });
+				// omp's stream options have no `timeoutMs`; the reducer budget is enforced by
+				// the AbortSignal it threads through `options.signal`.
+				expect(call?.options).toMatchObject({
+					cacheRetention: "none",
+					maxTokens: 2_048,
+					sessionId: config.runId,
+					apiKey: "test-key",
+				});
+				expect(call?.options).not.toHaveProperty("timeoutMs");
+				expect(call?.options.signal).toBeInstanceOf(AbortSignal);
 				expect(result.model).toBe(REDUCER_MODEL.id);
 				expect(result.provider).toBe(REDUCER_MODEL.provider);
 				expect(result.outputText).toContain("ERROR stress failure");
@@ -173,26 +174,31 @@ describe("SoL-Pi regression stress", () => {
 				const manager = new FakeSessionManager([], `epr-missing-${i}`, root);
 				const pi = new FakePi(manager);
 				createEvidencePreservingReducerExtension()(pi.asExtensionApi());
-				let calls = 0;
+				ACTIVE_MODEL.reset();
+				REDUCER_MODEL.reset();
+				REDUCER_MODEL.fallback = () => {
+					throw new Error("unexpected model call");
+				};
 				const context = fakeContext(manager, {
 					model: ACTIVE_MODEL,
 					modelRegistry: {
 						find: () => undefined,
-						complete: async () => {
-							calls++;
-							throw new Error("unexpected model call");
-						},
+						getApiKeyAndHeaders: async () => ({ ok: true }),
 					} as unknown as ExtensionContext["modelRegistry"],
 				});
 				const body = `ERROR stress failure\ncase=${i}\n${"diagnostic line\n".repeat(360 + (i % 20))}`;
 
 				expect(await pi.emit("tool_result", bashEvent(body, `call-${i}`), context)).toBeUndefined();
-				expect(calls).toBe(0);
+				// Neither the session's active model nor the unresolved reducer model was reached.
+				expect(ACTIVE_MODEL.calls).toHaveLength(0);
+				expect(REDUCER_MODEL.calls).toHaveLength(0);
 				expect(manager.customEntryData()).toContainEqual(
 					expect.objectContaining({ kind: "fallback", reason: "reducer-model-unavailable" }),
 				);
 			}
 		} finally {
+			REDUCER_MODEL.reset();
+			REDUCER_MODEL.fallback = undefined;
 			await rm(root, { recursive: true, force: true });
 		}
 	});

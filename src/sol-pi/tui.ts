@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Text } from "@earendil-works/pi-tui";
+import type { ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
+import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
+import { themeOf } from "./host-compat.ts";
 
 export type SolPiTuiMechanism =
 	| "Action Fusion"
@@ -41,10 +42,11 @@ export function renderSolPiTool(
 	saving: string,
 	base?: Component,
 ): Component {
+	const active = themeOf(theme);
 	const container = new Container();
-	const title = `${theme.fg("warning", "⚡")} ${theme.fg("accent", theme.bold(`SoL-Pi · ${mechanism}`))}`;
+	const title = `${active.fg("warning", "⚡")} ${active.fg("accent", active.bold(`SoL-Pi · ${mechanism}`))}`;
 	container.addChild(new Text(title, 0, 0));
-	container.addChild(new Text(theme.fg("success", `Money saved · ${saving}`), 0, 0));
+	container.addChild(new Text(active.fg("success", `Money saved · ${saving}`), 0, 0));
 	if (base) container.addChild(base);
 	return container;
 }

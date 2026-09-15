@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, SessionEntry, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { Component } from "@earendil-works/pi-tui";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext, SessionEntry, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import type { Component } from "@oh-my-pi/pi-tui";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -187,7 +187,13 @@ export function fakeContext(
 		sessionManager: manager,
 		modelRegistry: {},
 		model: undefined,
-		scopedModels: [],
+		// oh-my-pi exposes a read-only model query facade alongside the registry.
+		models: {
+			list: () => [],
+			current: () => undefined,
+			resolve: () => undefined,
+			family: () => "unknown",
+		},
 		ui: {},
 		isIdle: () => false,
 		isProjectTrusted: () => true,
@@ -195,9 +201,11 @@ export function fakeContext(
 		abort: () => undefined,
 		hasPendingMessages: () => false,
 		shutdown: () => undefined,
+		getAsyncJobSnapshot: () => null,
 		getContextUsage: () => undefined,
 		compact: () => undefined,
-		getSystemPrompt: () => "",
+		// oh-my-pi returns the system prompt as prompt segments, not one string.
+		getSystemPrompt: () => [""],
 		...overrides,
 	} as unknown as ExtensionContext;
 }
