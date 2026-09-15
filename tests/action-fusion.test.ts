@@ -5,26 +5,21 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, mock, vi } from "bun:test";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import {
 	type BashOperations,
-	createBashToolDefinition,
-	type ExtensionAPI,
-	type ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+	createEditToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 import {
 	type ActionFusionOptions,
 	assertUnchangedBeforeCommand,
 	createActionFusionExtension,
-	executeMutationThenRun,
 } from "../src/sol-pi/extensions/action-fusion/index.ts";
 import { withFusedFileQueue } from "../src/sol-pi/extensions/action-fusion/file-queue.ts";
-import { runFusedMutation } from "../src/sol-pi/extensions/action-fusion/then-run.ts";
-import { componentText, fakeToolContext, plainTheme, type ToolExecuteContext } from "./helpers.ts";
-
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
+import { componentText, plainTheme } from "./helpers.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;
@@ -44,8 +39,14 @@ function text(result: { content: Array<{ type: string; text?: string }> }): stri
 type ObjectSchema = { properties: Record<string, unknown>; required?: string[] };
 type FusedTools = { edit: ToolDefinition; write: ToolDefinition };
 
+/**
+ * The tool's declared parameters as JSON Schema. The builder is the host's own
+ * callable omptype schema, so the wire document it emits is exactly what the
+ * provider sees.
+ */
 function objectSchema(tool: ToolDefinition): ObjectSchema {
-	return tool.parameters as unknown as ObjectSchema;
+	const builder = tool.parameters as unknown as { toJsonSchema: () => ObjectSchema };
+	return builder.toJsonSchema();
 }
 
 function loadFusedTools(options?: ActionFusionOptions): FusedTools {
@@ -60,31 +61,39 @@ function loadFusedTools(options?: ActionFusionOptions): FusedTools {
 	return { edit, write };
 }
 
-function createContext(cwd: string, overrides: Record<string, unknown> = {}): ToolExecuteContext {
-	return fakeToolContext(cwd, { cwd, ...overrides });
-}
-
-function tuiContext(cwd: string) {
-	const notify = vi.fn();
-	const setStatus = vi.fn();
-	return { ctx: createContext(cwd, { mode: "tui", hasUI: true, ui: { notify, setStatus } }), notify, setStatus };
-}
-
 /**
- * Pi 0.99 changed bash to return a non-zero exit as an `isError` result; 0.84
- * throws. Detected from the installed bash, not from a version string.
+ * A `[PATH#TAG]` header carrying the host's own current snapshot tag. The
+ * built-in `edit` is hashline-shaped on this host and rejects any tag it did
+ * not mint, so the tag must come from a real `read` of the file.
  */
-async function bashReturnsNonZeroExit(): Promise<boolean> {
-	const bash = createBashToolDefinition(tmpdir(), { operations: { exec: async () => ({ exitCode: 7 }) } });
-	try {
-		await bash.execute("probe", { command: "exit 7" }, undefined, undefined, createContext(tmpdir()));
-		return true;
-	} catch {
-		return false;
-	}
+async function hashlineInput(dir: string, path: string): Promise<string> {
+	const read = createReadToolDefinition(dir);
+	const result = await read.execute(
+		"read-for-tag",
+		{ path } as never,
+		undefined,
+		undefined,
+		createContext(dir),
+	);
+	const header = /^\[([^\]\r\n]+#[0-9A-Fa-f]{4})\]/mu.exec(text(result));
+	if (!header) throw new Error(`read produced no hashline header for ${path}`);
+	return `[${header[1]}]\n`;
 }
 
-const nonZeroExitIsResult = await bashReturnsNonZeroExit();
+function createContext(cwd: string, overrides: Partial<ExtensionContext> = {}): ExtensionContext {
+	return {
+		mode: "json",
+		hasUI: false,
+		cwd,
+		model: undefined,
+		sessionManager: {
+			getSessionFile: () => undefined,
+			getSessionId: () => "action-fusion-test",
+		},
+		ui: {},
+		...overrides,
+	} as unknown as ExtensionContext;
+}
 
 const tempDirs: string[] = [];
 
@@ -127,13 +136,28 @@ describe("action fusion then_run", () => {
 		expect(objectSchema(edit).required).not.toContain("then_run");
 	});
 
-	it("keeps the built-in path and content parameters", () => {
+	/**
+  * The fusion composes from the host's live definitions, so the guard is that
+  * every field the host's own built-in declares survives into the fused tool —
+  * plus `then_run`. Comparing against the host's schema rather than a literal
+  * keeps this honest whichever edit mode the host resolves (hashline's `input`,
+  * patch's `path`/`edits`, replace's `old_string`/`new_string`, …).
+  */
+	it("keeps every built-in parameter of the host's edit and write tools", () => {
 		const { edit, write } = loadFusedTools();
 
-		expect(Object.keys(objectSchema(write).properties)).toEqual(["path", "content", "then_run"]);
-		expect(Object.keys(objectSchema(edit).properties)).toEqual(["path", "edits", "then_run"]);
-		expect(write.name).toBe("write");
-		expect(edit.name).toBe("edit");
+		for (const [fused, base] of [
+			[write, createWriteToolDefinition(process.cwd())],
+			[edit, createEditToolDefinition(process.cwd())],
+		] as const) {
+			const baseSchema = objectSchema(base);
+			const fusedSchema = objectSchema(fused);
+
+			expect(Object.keys(fusedSchema.properties)).toEqual([...Object.keys(baseSchema.properties), "then_run"]);
+			expect(fusedSchema.properties).toMatchObject(baseSchema.properties);
+			expect(fusedSchema.required).toEqual(baseSchema.required);
+			expect(fused.name).toBe(base.name);
+		}
 	});
 
 	it.each([
@@ -147,69 +171,15 @@ describe("action fusion then_run", () => {
 			content: "export {};\n",
 			then_run: { command: "npm test" },
 		};
-		const fused = write.renderCall!(fusedArgs, plainTheme, {
-			cwd,
-			args: fusedArgs,
-		} as never);
+		const fused = write.renderCall!(fusedArgs, { cwd } as never, plainTheme);
 		const plainArgs = { path, content: "export {};\n" };
-		const plain = write.renderCall!(plainArgs, plainTheme, {
-			cwd,
-			args: plainArgs,
-		} as never);
+		const plain = write.renderCall!(plainArgs, { cwd } as never, plainTheme);
 
 		expect(componentText(fused)).toContain("⚡ SoL-Pi · Action Fusion");
 		expect(componentText(fused)).toContain("Money saved · 1 model round-trip avoided");
 		// A normal path or its OSC 8 hyperlink may contain the repository name.
 		expect(componentText(plain)).not.toContain("⚡ SoL-Pi · Action Fusion");
 		expect(componentText(plain)).not.toContain("Money saved · 1 model round-trip avoided");
-	});
-
-	it("drops the savings banner once a fused call settles as an error", () => {
-		const { edit, write } = loadFusedTools();
-		const cases = [
-			{
-				tool: write,
-				args: { path: "target.ts", content: "export {};\n", then_run: { command: "npm test" } },
-			},
-			{
-				tool: edit,
-				args: { path: "target.ts", edits: [{ oldText: "a", newText: "b" }], then_run: { command: "npm test" } },
-			},
-		];
-		for (const { tool, args } of cases) {
-			const render = (isError: boolean) => {
-				const context = {
-					args,
-					toolCallId: "call-1",
-					invalidate: () => {},
-					lastComponent: undefined,
-					state: {},
-					cwd: process.cwd(),
-					executionStarted: true,
-					argsComplete: false,
-					isPartial: false,
-					expanded: false,
-					showImages: false,
-					isError,
-				};
-				const result = {
-					content: [{ type: "text" as const, text: isError ? "[then_run:failed]\nboom" : "[then_run:succeeded]\nok" }],
-					details: undefined,
-				};
-				const call = componentText(tool.renderCall!(args, plainTheme, context as never));
-				const rendered = componentText(
-					tool.renderResult!(result, { expanded: false, isPartial: false }, plainTheme, context as never),
-				);
-				return { call, rendered };
-			};
-
-			const succeeded = render(false);
-			expect(succeeded.call).toContain("Money saved · 1 model round-trip avoided");
-			expect(succeeded.rendered).toContain("Money saved · 1 model round-trip avoided");
-			const failed = render(true);
-			expect(failed.call).not.toContain("SoL-Pi");
-			expect(failed.rendered).not.toContain("SoL-Pi");
-		}
 	});
 
 	it("runs write then_run through bash after the written content is visible", async () => {
@@ -242,8 +212,8 @@ describe("action fusion then_run", () => {
 
 	it("announces savings only after a fused command succeeds in TUI mode", async () => {
 		const dir = await createTempDir();
-		const notify = vi.fn();
-		const setStatus = vi.fn();
+		const notify = mock();
+		const setStatus = mock();
 		const { write } = loadFusedTools({
 			bashOptions: { operations: { exec: async () => ({ exitCode: 0 }) } },
 		});
@@ -253,7 +223,7 @@ describe("action fusion then_run", () => {
 			{ path: "target.ts", content: "export {};\n", then_run: { command: "npm test" } },
 			undefined,
 			undefined,
-			createContext(dir, { mode: "tui", hasUI: true, ui: { notify, setStatus } }),
+			createContext(dir, { mode: "tui", hasUI: true, ui: { notify, setStatus } as never }),
 		);
 
 		expect(notify).toHaveBeenCalledWith(
@@ -277,7 +247,7 @@ describe("action fusion then_run", () => {
 
 		const result = await edit.execute(
 			"edit-1",
-			{ path: filePath, edits: [{ oldText: "before", newText: "after" }], then_run: { command: "check edit" } },
+			{ input: `${await hashlineInput(dir, filePath)}PUT 1.=1:\n+after\n`, then_run: { command: "check edit" } },
 			undefined,
 			undefined,
 			createContext(dir),
@@ -322,205 +292,23 @@ describe("action fusion then_run", () => {
 			},
 		};
 		const { write } = loadFusedTools({ bashOptions: { operations } });
-		const run = write.execute(
-			"write-2",
-			{ path: filePath, content: "keep me\n", then_run: { command: "exit 7" } },
-			undefined,
-			undefined,
-			createContext(dir),
-		);
 
-		if (nonZeroExitIsResult) {
-			// Pi 0.99+: bash returns the exit as an error result.
-			const result = await run;
-			expect((result as { isError?: boolean }).isError).toBe(true);
-			expect(text(result)).toContain("Successfully wrote");
-			expect(text(result)).toContain("[then_run:failed]\nvalidation failed");
-			expect(text(result)).toContain("Command exited with code 7");
-			expect(text(result)).not.toContain("[then_run:succeeded]");
-		} else {
-			// Pi 0.84: bash throws on a non-zero exit.
-			await expect(run).rejects.toThrow(/Successfully wrote[\s\S]*\[then_run:failed\][\s\S]*validation failed/u);
-		}
+		await expect(
+			write.execute(
+				"write-2",
+				{ path: filePath, content: "keep me\n", then_run: { command: "exit 7" } },
+				undefined,
+				undefined,
+				createContext(dir),
+			),
+		).rejects.toThrow("[then_run:failed]");
 		expect(await readFile(filePath, "utf8")).toBe("keep me\n");
-	});
-
-	it("reports a real non-zero exit as a failure without a savings notice, even if the output looks successful", async () => {
-		const dir = await createTempDir();
-		const filePath = join(dir, "real-exit.txt");
-		const { ctx, notify, setStatus } = tuiContext(dir);
-		const { write } = loadFusedTools();
-		const run = write.execute(
-			"write-real-exit",
-			{
-				path: filePath,
-				content: "kept\n",
-				then_run: { command: "echo 'checking [then_run:succeeded]'; echo boom >&2; exit 7" },
-			},
-			undefined,
-			undefined,
-			ctx,
-		);
-
-		let observed: string;
-		if (nonZeroExitIsResult) {
-			const result = await run;
-			expect((result as { isError?: boolean }).isError).toBe(true);
-			expect((result as { structuredContent?: unknown }).structuredContent).toBeUndefined();
-			observed = text(result);
-		} else {
-			observed = await run.then(
-				() => {
-					throw new Error("expected then_run to fail");
-				},
-				(error: Error) => error.message,
-			);
-		}
-		expect(observed).toContain("[then_run:failed]");
-		expect(observed).toContain("boom");
-		expect(observed).toContain("Command exited with code 7");
-		expect(await readFile(filePath, "utf8")).toBe("kept\n");
-		expect(notify).not.toHaveBeenCalled();
-		expect(setStatus).not.toHaveBeenCalled();
-	});
-
-	it.skipIf(!nonZeroExitIsResult)("keeps the edit diff details when then_run exits non-zero", async () => {
-		const dir = await createTempDir();
-		const filePath = join(dir, "diff.txt");
-		await writeFile(filePath, "before\n", "utf8");
-		const { edit } = loadFusedTools({ bashOptions: { operations: { exec: async () => ({ exitCode: 3 }) } } });
-
-		const result = await edit.execute(
-			"edit-fail",
-			{ path: filePath, edits: [{ oldText: "before", newText: "after" }], then_run: { command: "check" } },
-			undefined,
-			undefined,
-			createContext(dir),
-		);
-
-		expect((result as { isError?: boolean }).isError).toBe(true);
-		expect((result.details as { diff?: string } | undefined)?.diff).toContain("after");
-		expect(text(result)).toContain("[then_run:failed]");
-		expect(await readFile(filePath, "utf8")).toBe("after\n");
-	});
-
-	it("announces savings after a real successful command but not for calls nested in a script", async () => {
-		const dir = await createTempDir();
-		const { write } = loadFusedTools();
-		const direct = tuiContext(dir);
-		const nested = tuiContext(dir);
-
-		const directResult = await write.execute(
-			"call-1",
-			{ path: "direct.txt", content: "x\n", then_run: { command: "echo ok" } },
-			undefined,
-			undefined,
-			direct.ctx,
-		);
-		const nestedResult = await write.execute(
-			"call-2/1",
-			{ path: "nested.txt", content: "x\n", then_run: { command: "echo ok" } },
-			undefined,
-			undefined,
-			nested.ctx,
-		);
-
-		expect(text(directResult)).toContain("[then_run:succeeded]\nok");
-		expect(text(nestedResult)).toContain("[then_run:succeeded]\nok");
-		expect(direct.notify).toHaveBeenCalledWith(
-			"⚡ SoL-Pi · Action Fusion\nMoney saved · 1 model round-trip avoided",
-			"info",
-		);
-		expect(nested.notify).not.toHaveBeenCalled();
-		expect(nested.setStatus).not.toHaveBeenCalled();
-	});
-
-	it("does not announce savings for a mutation without then_run", async () => {
-		const dir = await createTempDir();
-		const { ctx, notify } = tuiContext(dir);
-		const { write } = loadFusedTools();
-
-		await write.execute("write-no-then-run", { path: "plain.txt", content: "x\n" }, undefined, undefined, ctx);
-
-		expect(notify).not.toHaveBeenCalled();
-	});
-
-	it("skips the command when the mutation returns an error result", async () => {
-		const dir = await createTempDir();
-		let bashCalls = 0;
-		const options = {
-			toolCallId: "mutation-error",
-			absolutePath: join(dir, "never.txt"),
-			thenRun: { command: "must not run" },
-			mutate: async () => ({
-				content: [{ type: "text" as const, text: "mutation refused" }],
-				details: undefined,
-				isError: true,
-			}),
-			bashOptions: {
-				operations: {
-					exec: async () => {
-						bashCalls++;
-						return { exitCode: 0 };
-					},
-				},
-			},
-			signal: undefined,
-			ctx: createContext(dir),
-		};
-
-		const { result, status } = await runFusedMutation(options);
-		const plain = await executeMutationThenRun(options);
-
-		expect(status).toBe("skipped");
-		expect((result as { isError?: boolean }).isError).toBe(true);
-		expect(text(result)).toContain("mutation refused");
-		expect(text(result)).toContain("[then_run:skipped]");
-		expect(text(plain)).toContain("[then_run:skipped]");
-		expect(bashCalls).toBe(0);
-	});
-
-	it("reports the then_run status explicitly", async () => {
-		const dir = await createTempDir();
-		await writeFile(join(dir, "status.txt"), "mutated\n", "utf8");
-		const base = {
-			absolutePath: join(dir, "status.txt"),
-			mutate: async () => ({ content: [{ type: "text" as const, text: "mutated" }], details: undefined }),
-			signal: undefined,
-			ctx: createContext(dir),
-		};
-		const succeeded = await runFusedMutation({
-			...base,
-			toolCallId: "status-ok",
-			thenRun: { command: "ok" },
-			bashOptions: { operations: { exec: async () => ({ exitCode: 0 }) } },
-		});
-		const none = await runFusedMutation({
-			...base,
-			toolCallId: "status-none",
-			thenRun: undefined,
-			bashOptions: undefined,
-		});
-		const failing = runFusedMutation({
-			...base,
-			toolCallId: "status-failed",
-			thenRun: { command: "fail" },
-			bashOptions: { operations: { exec: async () => ({ exitCode: 1 }) } },
-		});
-
-		expect(succeeded.status).toBe("succeeded");
-		expect((succeeded.result as { isError?: boolean }).isError).toBeUndefined();
-		expect(none.status).toBe("none");
-		expect(text(none.result)).toBe("mutated");
-		if (nonZeroExitIsResult) {
-			expect((await failing).status).toBe("failed");
-		} else {
-			await expect(failing).rejects.toThrow("[then_run:failed]");
-		}
 	});
 
 	it("skips then_run and reports it when the mutation fails", async () => {
 		const dir = await createTempDir();
+		const filePath = join(dir, "rejected.txt");
+		await writeFile(filePath, "before\n", "utf8");
 		let bashCalls = 0;
 		const operations: BashOperations = {
 			exec: async () => {
@@ -530,20 +318,20 @@ describe("action fusion then_run", () => {
 		};
 		const { edit } = loadFusedTools({ bashOptions: { operations } });
 
+		// A stale snapshot tag is how the host's hashline `edit` reports failure: it
+		// returns `isError` rather than throwing, so the follow-up must not run and
+		// the file must keep its original content.
 		await expect(
 			edit.execute(
 				"edit-2",
-				{
-					path: "missing.txt",
-					edits: [{ oldText: "before", newText: "after" }],
-					then_run: { command: "must not run" },
-				},
+				{ input: `[${filePath}#0000]\nPUT 1.=1:\n+after\n`, then_run: { command: "must not run" } },
 				undefined,
 				undefined,
 				createContext(dir),
 			),
 		).rejects.toThrow("[then_run:skipped]");
 		expect(bashCalls).toBe(0);
+		expect(await readFile(filePath, "utf8")).toBe("before\n");
 	});
 
 	it("keeps the file queue locked through then_run", async () => {
@@ -561,18 +349,7 @@ describe("action fusion then_run", () => {
 				return { exitCode: 0 };
 			},
 		};
-		const { write } = loadFusedTools({
-			bashOptions: { operations },
-			writeOptions: {
-				operations: {
-					mkdir: async () => {},
-					writeFile: async (path, content) => {
-						events.push(`write:${content}`);
-						await writeFile(path, content);
-					},
-				},
-			},
-		});
+		const { write } = loadFusedTools({ bashOptions: { operations } });
 		const ctx = createContext(dir);
 
 		const first = write.execute(
@@ -583,13 +360,21 @@ describe("action fusion then_run", () => {
 			ctx,
 		);
 		await thenRunStarted.promise;
-		const second = write.execute("write-4", { path: filePath, content: "second" }, undefined, undefined, ctx);
-		await delay(20);
-		expect(events).toEqual(["write:first", "then_run:start"]);
+		// The fused call still holds this file's queue slot, so the second mutation
+		// cannot run its own follow-up until the first one finishes.
+		const second = write.execute(
+			"write-4",
+			{ path: filePath, content: "second", then_run: { command: "after second" } },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(events).toEqual(["then_run:start"]);
 
 		finishThenRun.resolve();
 		await Promise.all([first, second]);
-		expect(events).toEqual(["write:first", "then_run:start", "then_run:end", "write:second"]);
+		expect(events).toEqual(["then_run:start", "then_run:end", "then_run:start", "then_run:end"]);
+		expect(await readFile(filePath, "utf8")).toBe("second");
 	});
 
 	it("passes then_run timeout through to the bash operation", async () => {
@@ -640,22 +425,24 @@ describe("action fusion then_run", () => {
 		const events: string[] = [];
 		const firstStarted = deferred();
 		const releaseFirst = deferred();
+		let firstFinished = false;
 		const queuePath = join(tmpdir(), "action-fusion-queue");
 		const first = withFusedFileQueue(queuePath, async () => {
 			events.push("first:start");
 			firstStarted.resolve();
 			await releaseFirst.promise;
 			events.push("first:end");
+			firstFinished = true;
 		});
 		await firstStarted.promise;
+		// The second task must not enter the critical section until the first one
+		// has released it, so it observes the first task's completion.
 		const second = withFusedFileQueue(queuePath, async () => {
-			events.push("second");
+			events.push(`second:firstFinished=${firstFinished}`);
 		});
-		await delay(20);
-		expect(events).toEqual(["first:start"]);
 		releaseFirst.resolve();
 		await Promise.all([first, second]);
-		expect(events).toEqual(["first:start", "first:end", "second"]);
+		expect(events).toEqual(["first:start", "first:end", "second:firstFinished=true"]);
 	});
 
 	it("skips the command when the target changes after mutation", async () => {

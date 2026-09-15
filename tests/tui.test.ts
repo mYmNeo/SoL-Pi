@@ -3,13 +3,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
+import { Text } from "@oh-my-pi/pi-tui";
+import { afterEach, describe, expect, it, mock, vi } from "bun:test";
 import {
 	formatSavingsBytes,
 	formatSavingsCount,
-	isNestedToolCallId,
 	renderSolPiTool,
 	showSolPiSavings,
 } from "../src/sol-pi/tui.ts";
@@ -20,8 +19,8 @@ const theme = {
 } as unknown as Theme;
 
 function uiContext(mode: ExtensionContext["mode"]) {
-	const notify = vi.fn();
-	const setStatus = vi.fn();
+	const notify = mock();
+	const setStatus = mock();
 	return {
 		context: { mode, ui: { notify, setStatus } } as unknown as ExtensionContext,
 		notify,
@@ -68,14 +67,6 @@ describe("SoL-Pi TUI savings presentation", () => {
 		);
 		vi.advanceTimersByTime(4_000);
 		expect(setStatus).toHaveBeenLastCalledWith("sol-pi-savings", undefined);
-	});
-
-	it("recognizes calls a tool made through ctx.executeTool by their <parent>/<n> id", () => {
-		expect(isNestedToolCallId("toolu_01AbC/1")).toBe(true);
-		expect(isNestedToolCallId("cm1/2/12")).toBe(true);
-		expect(isNestedToolCallId("toolu_01AbC")).toBe(false);
-		expect(isNestedToolCallId("call_abc|fc_def")).toBe(false);
-		expect(isNestedToolCallId("call-1:then_run")).toBe(false);
 	});
 
 	it.each(["rpc", "json", "print"] as const)("does not emit presentation in %s mode", (mode) => {

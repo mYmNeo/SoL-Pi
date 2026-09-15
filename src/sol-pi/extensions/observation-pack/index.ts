@@ -5,29 +5,19 @@
 /**
  * ObservationPack - keep large tool results reachable without replaying them.
  *
- * A large tool result is sent in full for its first few provider requests, then
- * replaced with a short, stable placeholder for every later request. The
- * original bytes are archived by observation id outside the provider context,
- * and the agent pulls exact pages back with the registered `obs_recall` tool.
- *
- * The mechanism never edits stored history. It rewrites only at the projection
- * layer (`pi.on("context")`), so the stored session stays intact and recall
- * keeps working after native compaction or a session resume. Pi hands context
- * handlers a structured clone of the conversation, and the placeholder replaces
- * the content of that clone's message objects in place: since Pi 0.87 a handler
- * that returns different message objects makes Pi collapse every
- * mid-conversation system message (prompt and tool-declaration deltas) into one
- * leading system message, which breaks the provider's cached prefix on every
- * later request. Pi 0.84 sends the edited clone too, so the handler returns
- * nothing on every version.
- *
- * Storage lives under the active Pi session directory.
+ * A tool result is sent in full for its first {@link FULL_SENDS} provider
+ * requests. After that it is replaced by a placeholder carrying the head and
+ * tail of the original, a content-addressed id, and a paging instruction; the
+ * bytes stay on disk and the model can read any slice back with `obs_recall`.
+ * The decision is derived from message position, so the same request always
+ * projects the same way and the prompt prefix stays stable across turns.
  */
 
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
+import { Text } from "@oh-my-pi/pi-tui";
+import { Type } from "@oh-my-pi/omptype/typebox";
+import { rendererArgs, themeOf } from "../../host-compat.ts";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { formatSavingsCount, renderSolPiTool, showSolPiSavings } from "../../tui.ts";
 import { createLedger, type Ledger } from "./ledger.ts";
@@ -73,8 +63,6 @@ export function createObservationPackExtension(): ExtensionFactory {
 			name: "obs_recall",
 			label: "Recall Observation",
 			description: "Read a stored large tool result by observation id and byte offset.",
-			promptSnippet: "Recall a paged excerpt from a previously replaced large tool result",
-			renderShell: "self",
 			parameters: Type.Object({
 				id: Type.String({ description: "Observation id from a placeholder" }),
 				offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset, default 0" })),
@@ -120,15 +108,25 @@ export function createObservationPackExtension(): ExtensionFactory {
 					},
 				};
 			},
-			renderCall(params, theme) {
-				const offset = params.offset ?? 0;
-				const base = new Text(theme.fg("dim", `Recall ${params.id} from byte ${offset}`), 0, 0);
-				return renderSolPiTool(theme, "Observation Pack", "full observation replay avoided", base);
+			// oh-my-pi calls `renderCall(args, options, theme)` and
+			// `renderResult(result, options, theme, args)`; `rendererArgs` reads
+			// whichever slot actually carries the theme.
+			renderCall: (...hostArgs) => {
+				const { theme } = rendererArgs(hostArgs);
+				const resolved = themeOf(theme);
+				const params = hostArgs[0] as { id: string; offset?: number } | undefined;
+				const offset = params?.offset ?? 0;
+				const base = new Text(resolved.fg("dim", `Recall ${params?.id} from byte ${offset}`), 0, 0);
+				return renderSolPiTool(resolved, "Observation Pack", "full observation replay avoided", base);
 			},
-			renderResult(result, { isPartial }, theme) {
-				const details = result.details as { bytes?: number; lines?: number } | undefined;
+			renderResult: (...hostArgs) => {
+				const { theme, options } = rendererArgs(hostArgs);
+				const resolved = themeOf(theme);
+				const result = hostArgs[0] as { details?: { bytes?: number; lines?: number } } | undefined;
+				const isPartial = (options as { isPartial?: boolean } | undefined)?.isPartial === true;
+				const details = result?.details;
 				const base = new Text(
-					theme.fg(
+					resolved.fg(
 						isPartial ? "warning" : "dim",
 						isPartial
 							? "Recalling the requested slice..."
@@ -137,11 +135,12 @@ export function createObservationPackExtension(): ExtensionFactory {
 					0,
 					0,
 				);
-				return renderSolPiTool(theme, "Observation Pack", "full observation replay avoided", base);
+				return renderSolPiTool(resolved, "Observation Pack", "full observation replay avoided", base);
 			},
 		});
 
 		pi.on("context", async (event, ctx: ExtensionContext) => {
+			const projected = [...event.messages];
 			const root = runtimeRoot(ctx);
 			// How many provider requests each message has already been part of,
 			// counted by the assistant messages that follow it.
@@ -203,8 +202,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 							formatSavingsCount(removedTokens, "context tokens avoided"),
 						);
 					}
-					// Same message object, new content: see the note at the top of this file.
-					message.content = [{ type: "text", text: placeholder }];
+					projected[index] = { ...message, content: [{ type: "text", text: placeholder }] };
 					sentCounts.set(sendCountKey, previousSends + 1);
 				} catch (error) {
 					// Fail open: a packing failure must never cost the agent its observation.
@@ -212,6 +210,8 @@ export function createObservationPackExtension(): ExtensionFactory {
 					console.error(`[observationpack] fail-open for tool result: ${reason}`);
 				}
 			}
+
+			return { messages: projected };
 		});
 	};
 }

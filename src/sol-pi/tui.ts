@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Text } from "@earendil-works/pi-tui";
+import type { ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
+import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
+import { themeOf } from "./host-compat.ts";
 
 export type SolPiTuiMechanism =
 	| "Action Fusion"
@@ -41,23 +42,13 @@ export function renderSolPiTool(
 	saving: string,
 	base?: Component,
 ): Component {
+	const active = themeOf(theme);
 	const container = new Container();
-	const title = `${theme.fg("warning", "⚡")} ${theme.fg("accent", theme.bold(`SoL-Pi · ${mechanism}`))}`;
+	const title = `${active.fg("warning", "⚡")} ${active.fg("accent", active.bold(`SoL-Pi · ${mechanism}`))}`;
 	container.addChild(new Text(title, 0, 0));
-	container.addChild(new Text(theme.fg("success", `Money saved · ${saving}`), 0, 0));
+	container.addChild(new Text(active.fg("success", `Money saved · ${saving}`), 0, 0));
 	if (base) container.addChild(base);
 	return container;
-}
-
-/**
- * Whether a tool call was made by another tool through `ctx.executeTool()`,
- * such as a codemode script, rather than by the model. Pi 0.99+ gives such
- * calls the id `<calling id>/<n>` (documented on `ExtensionToolContext`) and
- * passes no other marker to `execute()`. Provider-issued ids do not end in
- * `/<digits>`; a false match would only suppress a savings notice.
- */
-export function isNestedToolCallId(toolCallId: string): boolean {
-	return /\/\d+$/u.test(toolCallId);
 }
 
 export function showSolPiSavings(

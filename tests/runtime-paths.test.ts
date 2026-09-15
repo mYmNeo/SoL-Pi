@@ -6,8 +6,8 @@
 import { rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { SessionManager, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { afterEach, describe, expect, it } from "bun:test";
 import { runtimeRoot } from "../src/sol-pi/runtime-paths.ts";
 
 const temporaryRoots = new Set<string>();
@@ -27,13 +27,13 @@ function context(sessionDir: string, sessionId: string): ExtensionContext {
 }
 
 describe("SoL-Pi runtime root", () => {
-	it("gives each Pi session its own directory", () => {
+	it("gives each session its own directory", () => {
 		const sessionDir = join("sessions", "project-a");
 		expect(runtimeRoot(context(sessionDir, "session-a"))).toBe(join(sessionDir, "sol-pi", "session-a"));
 		expect(runtimeRoot(context(sessionDir, "session-b"))).toBe(join(sessionDir, "sol-pi", "session-b"));
 	});
 
-	it("keeps one private temporary directory per in-memory session across contexts", () => {
+	it("keeps one private temporary directory per in-memory session across contexts", async () => {
 		const manager = SessionManager.inMemory();
 		expect(manager.getSessionDir()).toBe("");
 		expect(manager.getSessionFile()).toBeUndefined();
@@ -44,7 +44,7 @@ describe("SoL-Pi runtime root", () => {
 		if (process.platform !== "win32") expect(statSync(root).mode & 0o777).toBe(0o700);
 		expect(runtimeRoot(context("", manager.getSessionId()))).toBe(root);
 
-		manager.newSession();
+		await manager.newSession();
 		const nextRoot = runtimeRoot(context("", manager.getSessionId()));
 		temporaryRoots.add(nextRoot);
 		expect(nextRoot).not.toBe(root);
@@ -64,8 +64,8 @@ describe("SoL-Pi runtime root", () => {
 	it.each(["", ".", "..", "../escape", "nested/session", "nested\\session"])(
 		"rejects unsafe session id %j",
 		(sessionId) => {
-			expect(() => runtimeRoot(context("sessions", sessionId))).toThrow("safe Pi session id");
-			expect(() => runtimeRoot(context("", sessionId))).toThrow("safe Pi session id");
+			expect(() => runtimeRoot(context("sessions", sessionId))).toThrow("safe session id");
+			expect(() => runtimeRoot(context("", sessionId))).toThrow("safe session id");
 		},
 	);
 });

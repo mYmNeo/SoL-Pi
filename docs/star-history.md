@@ -15,4 +15,4 @@ export STAR_HISTORY_RENDERER=/absolute/path/to/star-history-checkout
 "$STAR_HISTORY_RENDERER/backend/node_modules/.bin/tsx" scripts/update-star-history.mjs NVlabs/SoL-Pi /absolute/path/to/star-history-preview
 ```
 
-For a higher API rate limit, supply `GITHUB_TOKEN` through the environment. Never put the token in a URL or command argument. Run generator tests with `npx vitest run tests/star-history.test.js`.
+For a higher API rate limit, supply `GITHUB_TOKEN` through the environment. Never put the token in a URL or command argument. Run generator tests with `bun test tests/star-history.test.js`.

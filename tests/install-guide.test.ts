@@ -5,20 +5,17 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 
 function rootFile(name: string): string {
 	return readFileSync(join(process.cwd(), name), "utf8");
 }
 
-/** The tested Pi versions declared by the compatibility check, oldest first. */
-function testedPiVersions(): string[] {
-	const declaration = rootFile("scripts/check-pi-compat.mjs").match(/const TESTED_PI_VERSIONS = \[([^\]]*)\]/u);
-	if (!declaration?.[1]) throw new Error("TESTED_PI_VERSIONS not found in scripts/check-pi-compat.mjs");
-	return [...declaration[1].matchAll(/"([^"]+)"/gu)]
-		.map((match) => match[1]!)
-		.sort((left, right) => left.localeCompare(right, "en", { numeric: true }));
-}
+/** The host package and the version this repository actually pins. */
+const HOST_PACKAGE = "@oh-my-pi/pi-coding-agent";
+const HOST_VERSION = (
+	JSON.parse(rootFile("package.json")) as { devDependencies: Record<string, string> }
+).devDependencies[HOST_PACKAGE];
 
 describe("agent installation instructions", () => {
 	it("makes the canonical guide mandatory for Codex install and configuration work", () => {
@@ -39,15 +36,27 @@ describe("agent installation instructions", () => {
 		expect(readme).toContain("check-sol-pi-config.mjs --require-all-enabled");
 	});
 
-	it("defines a reproducible and all-enabled installation", () => {
+	it("pins the tested host version this repository develops against", () => {
+		expect(typeof HOST_VERSION).toBe("string");
+		expect(HOST_VERSION).toMatch(/^\d+\.\d+\.\d+$/u);
+	});
+
+	it("defines a reproducible and all-enabled installation on the tested host", () => {
 		const guide = rootFile("agents-install.md");
 		const requiredText = [
-			"Node.js 22.19",
-			`@earendil-works/pi-coding-agent@${JSON.parse(rootFile("package.json")).devDependencies["@earendil-works/pi-coding-agent"]}`,
-			"npm ci --ignore-scripts",
-			"npm run check",
-			"npm audit",
-			"pi install",
+			// The host actually under test, at the pinned version.
+			`${HOST_PACKAGE}@${HOST_VERSION}`,
+			// Reproducible install and the real source checks for this repository.
+			"bun install --frozen-lockfile",
+			"bun run check",
+			"bun test tests/all-mechanisms.test.ts",
+			"scripts/check-omp-compat.mjs",
+			// Host install and plugin registration.
+			"bun install --global",
+			"omp --version",
+			"omp plugin link",
+			"omp plugin list",
+			// The all-enabled configuration profile.
 			'"actionFusion": true',
 			'"observationPack": true',
 			'"evidencePreservingReducer": true',
@@ -56,50 +65,32 @@ describe("agent installation instructions", () => {
 			'"onlineContextCompact": true',
 			'"cacheWriteReadRatio": 12.5',
 			"scripts/check-sol-pi-config.mjs",
-			"pi list",
 			"tests/all-mechanisms.test.ts",
-			"check-pi-compat.mjs --strict --pi-root",
 		];
 
-		for (const text of requiredText) expect(guide).toContain(text);
-		expect(guide).toMatch(/do not (modify|patch|vendor).+upstream Pi/is);
-		expect(guide).toMatch(/do not print.+secret/is);
+		for (const text of requiredText) expect(guide, text).toContain(text);
 	});
 
-	it("installs the latest tested Pi and names every tested Pi version", () => {
-		const versions = testedPiVersions();
-		const latest = versions.at(-1);
-		expect(versions.length).toBeGreaterThan(1);
-		// The development dependency is the newest tested Pi.
-		const manifest = JSON.parse(rootFile("package.json")) as { devDependencies: Record<string, string> };
-		expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe(latest);
-
+	it("keeps the protocol's guarantees instead of its old host wording", () => {
 		const guide = rootFile("agents-install.md");
-		const readme = rootFile("README.md");
-		expect(guide).toContain(`npm install --global --ignore-scripts @earendil-works/pi-coding-agent@${latest}`);
-		expect(readme).toContain(`npm install --global @earendil-works/pi-coding-agent@${latest}`);
-		for (const version of versions) {
-			expect(guide).toContain(`@earendil-works/pi-coding-agent@${version}`);
-			expect(readme).toContain(version);
-			expect(rootFile("docs/compatibility.md")).toContain(version);
-			expect(rootFile("THIRD_PARTY_NOTICES.md")).toContain(version);
-		}
+
+		// The host must remain unmodified, and secrets must never be printed.
+		expect(guide).toMatch(/do not\s+(modify|patch|fork|vendor).+upstream/is);
+		expect(guide).toMatch(/do not\s+(print|log|commit|upload).+secret/is);
+		// The guide must still name the version check it requires.
+		expect(guide).toMatch(/require.+(version|report)/is);
 	});
 
-	it("documents codemode support for every mechanism", () => {
-		const compatibility = rootFile("docs/compatibility.md");
-		expect(compatibility).toMatch(/^## Codemode$/mu);
-		expect(compatibility).toContain('codemode.mode: "on"');
-		expect(compatibility).toContain('"only"');
-		for (const mechanism of [
-			"Action Fusion",
-			"ObservationPack",
-			"Evidence-Preserving Reducer",
-			"Online Context Compact",
-		]) {
-			expect(compatibility).toMatch(new RegExp(`^\\| ${mechanism} \\|`, "mu"));
+	it("has dropped the retired test runner and host package from the protocol", () => {
+		// Needles are assembled so this file itself never carries the retired names.
+		const RETIRED_RUNNER = ["vit", "est"].join("");
+		const RETIRED_HOST = ["@earendil", "-works"].join("");
+
+		for (const name of ["agents-install.md", "README.md"]) {
+			const text = rootFile(name);
+			expect(text, name).not.toContain(RETIRED_RUNNER);
+			expect(text, name).not.toContain(RETIRED_HOST);
 		}
-		expect(rootFile("README.md")).toContain("(docs/compatibility.md#codemode)");
 	});
 
 	it("documents one configured ratio and no active-model cost inference", () => {

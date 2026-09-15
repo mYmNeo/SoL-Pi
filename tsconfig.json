@@ -8,7 +8,7 @@
 		"noEmit": true,
 		"noUncheckedIndexedAccess": true,
 		"forceConsistentCasingInFileNames": true,
-		"types": ["node", "vitest/globals"],
+		"types": ["node", "bun"],
 		"allowImportingTsExtensions": true,
 		"skipLibCheck": true
 	},
