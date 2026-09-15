@@ -6,8 +6,8 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { type FileHandle, lstat, mkdir, open } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { TextContent, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 
 /** Only tool results larger than this participate. */
 export const THRESHOLD_BYTES = 10 * 1024;

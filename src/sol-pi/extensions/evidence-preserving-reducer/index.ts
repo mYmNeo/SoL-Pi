@@ -16,7 +16,7 @@
  * Delegation therefore never requires trusting a fluent summary.
  *
  * The top-level SoL-Pi config enables this mechanism. Provider selection and
- * authentication remain with Pi; storage and run identity come from the session.
+ * authentication remain with omp; storage and run identity come from the session.
  */
 
 import type {
@@ -24,7 +24,7 @@ import type {
 	ExtensionContext,
 	ExtensionFactory,
 	ToolResultEvent,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { formatSavingsBytes, showSolPiSavings } from "../../tui.ts";
 import { archiveBody, archiveRoot } from "./archive.ts";

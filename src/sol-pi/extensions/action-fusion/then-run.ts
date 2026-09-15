@@ -4,9 +4,13 @@
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type BashToolOptions, createBashToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import {
+	type BashToolOptions,
+	createBashToolDefinition,
+	Type,
+} from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 import { withFusedFileQueue } from "./file-queue.ts";
 
 export const THEN_RUN_SUCCEEDED = "[then_run:succeeded]";
@@ -71,13 +75,18 @@ export async function assertUnchangedBeforeCommand(
  * Apply a file mutation and, when the model asked for one, run its follow-up
  * command before returning a single observation.
  *
- * Both steps run inside one SoL-Pi queue slot for `absolutePath`, so another
- * fused mutation of the same file cannot interleave. Pi's built-in mutation
- * tool keeps its own queue; the two queues are not nested.
+ * Both steps run inside one SoL-Pi queue slot covering every mutated path, so
+ * another fused mutation of the same file cannot interleave. The host's
+ * built-in mutation tool keeps its own queue; the two queues are not nested.
+ *
+ * `absolutePaths` is empty when the host's own argument inspector could not name
+ * a target file. The mutation still runs — it is the model's own edit — but the
+ * follow-up is reported skipped rather than run without the pre-command content
+ * guard.
  */
 export async function executeMutationThenRun<TDetails>({
 	toolCallId,
-	absolutePath,
+	absolutePaths,
 	thenRun,
 	mutate,
 	bashOptions,
@@ -85,29 +94,41 @@ export async function executeMutationThenRun<TDetails>({
 	ctx,
 }: {
 	toolCallId: string;
-	absolutePath: string;
+	absolutePaths: readonly string[];
 	thenRun: ThenRunInput | undefined;
 	mutate: () => Promise<AgentToolResult<TDetails>>;
 	bashOptions: BashToolOptions | undefined;
 	signal: AbortSignal | undefined;
 	ctx: ExtensionContext;
 }): Promise<AgentToolResult<TDetails>> {
-	return withFusedFileQueue(absolutePath, async () => {
+	const fused = async (): Promise<AgentToolResult<TDetails>> => {
 		let mutationResult: AgentToolResult<TDetails>;
 		try {
 			mutationResult = await mutate();
 		} catch (error) {
-			if (thenRun !== undefined) {
-				throw thenRunSkippedError(error);
-			}
+			if (thenRun !== undefined) throw thenRunSkippedError(error);
 			throw error;
 		}
 
 		if (thenRun === undefined) {
 			return mutationResult;
 		}
+		// A built-in mutation may report failure by returning `isError` instead of
+		// throwing — the hashline edit rejects a stale snapshot tag that way — so a
+		// returned result is not proof the mutation landed. Running the follow-up
+		// would then execute a command against content the model believes it changed.
+		if (mutationResult.isError === true) {
+			throw thenRunSkippedError(new Error(resultText(mutationResult) || "The file mutation reported an error."));
+		}
+		if (absolutePaths.length === 0) {
+			throw new Error(
+				`${THEN_RUN_SKIPPED} The mutated file could not be identified from the tool arguments; the command was not run.`,
+			);
+		}
 
-		await assertUnchangedBeforeCommand(absolutePath);
+		for (const path of absolutePaths) {
+			await assertUnchangedBeforeCommand(path);
+		}
 		const bash = createBashToolDefinition(ctx.cwd, bashOptions);
 		try {
 			const bashResult = await bash.execute(`${toolCallId}:then_run`, thenRun, signal, undefined, ctx);
@@ -123,5 +144,21 @@ export async function executeMutationThenRun<TDetails>({
 			const mutationOutput = resultText(mutationResult);
 			throw new Error([mutationOutput, THEN_RUN_FAILED, errorText(error)].filter(Boolean).join("\n\n"));
 		}
-	});
+	};
+
+	// Without a target there is nothing to serialize against: the queue exists to
+	// order two fused mutations that touch the same file.
+	const targets = [...new Set(absolutePaths)].sort();
+	if (targets.length === 0) return fused();
+
+	// Hold one queue slot per target for the whole mutation-plus-command span, so
+	// an overlapping multi-file edit cannot interleave. Acquiring in sorted order
+	// keeps two callers that share a subset of targets from deadlocking.
+	let guarded = fused;
+	for (let index = targets.length - 1; index >= 0; index -= 1) {
+		const target = targets[index] as string;
+		const inner = guarded;
+		guarded = () => withFusedFileQueue(target, inner);
+	}
+	return guarded();
 }

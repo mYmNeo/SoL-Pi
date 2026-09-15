@@ -5,7 +5,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname } from "node:path";
-import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
 import { recordValue } from "./config.ts";
 
 /** Markers written by the action-fusion extension around a fused command's output. */
@@ -42,8 +42,10 @@ async function safePiBashTempPath(path: string | undefined): Promise<boolean> {
 }
 
 /**
- * Prefer the untruncated file pi wrote for a large bash result, so evidence is
- * checked against the exact bytes the command produced rather than a preview.
+ * Prefer the untruncated file the host wrote for a large bash result, so
+ * evidence is checked against the exact bytes the command produced rather than
+ * a preview. Only a regular, non-symlink `pi-bash-*.log` directly inside the
+ * system temporary directory is accepted.
  */
 async function exactBodyFromInline(inline: string, details: unknown): Promise<string> {
 	const detailsPath = detailsFullOutputPath(details);

@@ -4,19 +4,22 @@ SoL-Pi does not vendor third-party source code. Its npm tarball contains only So
 
 ## Runtime peer dependencies
 
-The following packages are supplied by the user's Pi installation and retain their own licenses:
+The following packages are supplied by the user's oh-my-pi runtime and retain their own licenses:
 
 | Package | Development-tested version | License | Source |
 |---|---:|---|---|
-| `@earendil-works/pi-agent-core` | 0.85.1 | MIT | <https://github.com/earendil-works/pi> |
-| `@earendil-works/pi-ai` | 0.85.1 | MIT | <https://github.com/earendil-works/pi> |
-| `@earendil-works/pi-coding-agent` | 0.85.1 | MIT | <https://github.com/earendil-works/pi> |
-| `@earendil-works/pi-tui` | 0.85.1 | MIT | <https://github.com/earendil-works/pi> |
-| `typebox` | 1.3.7 | MIT | <https://github.com/sinclairzx81/typebox> |
+| `@oh-my-pi/pi-agent-core` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-ai` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-coding-agent` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-tui` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-utils` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/omptype` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
+
+These packages ship raw TypeScript and are loaded by Bun; `omp` owns their installation and upgrades. `@oh-my-pi/omptype` supplies the `Type.*` schema builders used for tool parameters; `omp` also injects a TypeBox facade at `pi.typebox`, but this extension imports omptype directly.
 
 ## Development-only dependencies
 
-`@types/node` (MIT), TypeScript (Apache-2.0), and Vitest (MIT) are used to type-check and test the repository. They are not included in the SoL-Pi npm tarball. Exact versions and transitive dependency metadata are recorded in `package-lock.json`.
+`@types/bun` (MIT), `@types/node` (MIT), and TypeScript (Apache-2.0) are used to type-check the repository, and the Bun runtime runs its test suite. They are not included in the SoL-Pi npm tarball. Exact versions and transitive dependency metadata are recorded in `bun.lock`.
 
 ## Star history chart generation
 

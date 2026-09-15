@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { fetchStarHistory, toDailyPoints } from "../scripts/update-star-history.mjs";
 
 const sunday = Date.parse("2026-09-06T00:00:00Z") / 1000;
