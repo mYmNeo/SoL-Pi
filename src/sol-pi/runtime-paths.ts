@@ -6,7 +6,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 const temporaryRoots = new Map<string, string>();
 
@@ -14,7 +14,7 @@ export function runtimeRoot(ctx: ExtensionContext): string {
 	const sessionDir = ctx.sessionManager.getSessionDir();
 	const sessionId = ctx.sessionManager.getSessionId();
 	if (!/^[a-z0-9][a-z0-9._-]*$/iu.test(sessionId)) {
-		throw new Error("SoL-Pi requires a safe Pi session id");
+		throw new Error("SoL-Pi requires a safe session id");
 	}
 	if (sessionDir) return join(sessionDir, "sol-pi", sessionId);
 

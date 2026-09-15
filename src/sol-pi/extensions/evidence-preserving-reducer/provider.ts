@@ -3,32 +3,47 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { Api, AssistantMessage, Context, Model, ProviderStreamOptions } from "@earendil-works/pi-ai";
-import { complete as completeCompat } from "@earendil-works/pi-ai/compat";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	complete,
+	type Api,
+	type AssistantMessage,
+	type Context,
+	type Model,
+	type OptionsForApi,
+} from "@oh-my-pi/pi-ai";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ArchiveObject } from "./archive.ts";
 import type { ReducerConfig } from "./config.ts";
 import { reducerInput, reducerInstructions } from "./receipt.ts";
 
-export type CompatComplete = typeof completeCompat;
-type ResolvedCompatAuth =
+/**
+ * The reducer's completion seam: omp's `complete` by default, injectable so a
+ * caller can drive `callReducer` without a provider.
+ *
+ * The `Record<string, unknown>` half carries the auth-scoped `env` passthrough,
+ * which the host's `StreamOptions` does not name.
+ */
+export type CompatComplete = (
+	model: Model<Api>,
+	context: Context,
+	options?: OptionsForApi<Api> & Record<string, unknown>,
+) => Promise<AssistantMessage>;
+
+/**
+ * Authentication material the host resolves for one reducer request.
+ *
+ * Mirrors `ModelRegistry.getApiKeyAndHeaders` on omp 18.2.0: it reports no
+ * `baseUrl`, and its `headers` are already null-free, so both pass straight
+ * through.
+ */
+export type ReducerRequestAuth =
 	| {
-			readonly ok: true;
-			readonly apiKey?: string;
-			readonly baseUrl?: string;
-			readonly env?: Record<string, string>;
-			readonly headers?: Record<string, string | null>;
-	  }
+		readonly ok: true;
+		readonly apiKey?: string;
+		readonly headers?: Record<string, string>;
+		readonly env?: Record<string, string>;
+	}
 	| { readonly ok: false; readonly error: string };
-type CompatibleModelRegistry = {
-	readonly find?: (provider: string, modelId: string) => Model<Api> | undefined;
-	readonly complete?: (
-		model: Model<Api>,
-		context: Context,
-		options?: ProviderStreamOptions,
-	) => Promise<AssistantMessage>;
-	readonly getApiKeyAndHeaders: (model: Model<Api>) => Promise<ResolvedCompatAuth>;
-};
 
 export interface NormalizedUsage {
 	readonly input: number;
@@ -66,19 +81,20 @@ function normalizedUsage(response: AssistantMessage): NormalizedUsage {
 	};
 }
 
-function stringHeaders(headers: Record<string, string | null> | undefined): Record<string, string> | undefined {
-	if (headers === undefined) return undefined;
-	return Object.fromEntries(Object.entries(headers).filter((entry): entry is [string, string] => entry[1] !== null));
-}
-
-function operationSignal(parent: AbortSignal | undefined, timeoutMs: number): {
+/**
+ * Bound the reducer call by its own budget.
+ *
+ * omp's `ExtensionContext` carries no abort signal and a `tool_result` event
+ * carries none either, so there is no parent signal to relay: this timeout is
+ * the only cancellation the extension controls, and it is always armed. The
+ * signal is what enforces the budget — omp's stream options have no total
+ * request deadline, so the abort is threaded through `options.signal` instead.
+ */
+function operationSignal(timeoutMs: number): {
 	readonly cleanup: () => void;
 	readonly signal: AbortSignal;
 } {
 	const controller = new AbortController();
-	const relayAbort = () => controller.abort(parent?.reason);
-	if (parent?.aborted) relayAbort();
-	else parent?.addEventListener("abort", relayAbort, { once: true });
 	const timer = setTimeout(
 		() => controller.abort(new DOMException("Reducer model call timed out", "AbortError")),
 		timeoutMs,
@@ -87,13 +103,12 @@ function operationSignal(parent: AbortSignal | undefined, timeoutMs: number): {
 		signal: controller.signal,
 		cleanup: () => {
 			clearTimeout(timer);
-			parent?.removeEventListener("abort", relayAbort);
 		},
 	};
 }
 
-function resolveReducerModel(config: ReducerConfig, registry: CompatibleModelRegistry): Model<Api> {
-	const model = registry.find?.(config.reducerProvider, config.reducerModel);
+function resolveReducerModel(config: ReducerConfig, registry: ExtensionContext["modelRegistry"]): Model<Api> {
+	const model = registry.find(config.reducerProvider, config.reducerModel);
 	if (!model) {
 		throw new ReducerModelUnavailableError(
 			`Reducer model is unavailable: ${config.reducerProvider}/${config.reducerModel}`,
@@ -102,7 +117,7 @@ function resolveReducerModel(config: ReducerConfig, registry: CompatibleModelReg
 	return model;
 }
 
-/** Use the configured reducer model and Pi-managed authentication for the reducer call. */
+/** Use the configured reducer model and host-resolved authentication for the reducer call. */
 export async function callReducer(
 	config: ReducerConfig,
 	command: string,
@@ -110,14 +125,20 @@ export async function callReducer(
 	archive: ArchiveObject,
 	body: string,
 	context: ExtensionContext,
-	compatComplete: CompatComplete = completeCompat,
+	completeCall: CompatComplete = complete,
 ): Promise<ProviderResult> {
-	const registry = context.modelRegistry as unknown as CompatibleModelRegistry;
-	const model = resolveReducerModel(config, registry);
-	const operation = operationSignal(context.signal, config.timeoutMs);
+	const model = resolveReducerModel(config, context.modelRegistry);
+	const auth: ReducerRequestAuth = await context.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) throw new Error(auth.error);
+	// A model that declares no output cap (`maxTokens: null`) is bounded by the
+	// reducer budget alone.
+	const modelCap = model.maxTokens;
+	const maxTokens =
+		typeof modelCap === "number" && modelCap > 0 ? Math.min(config.maxOutputTokens, modelCap) : config.maxOutputTokens;
+	const operation = operationSignal(config.timeoutMs);
 	try {
-		const requestContext = {
-			systemPrompt: reducerInstructions(),
+		const requestContext: Context = {
+			systemPrompt: [reducerInstructions()],
 			messages: [
 				{
 					role: "user" as const,
@@ -128,26 +149,14 @@ export async function callReducer(
 		};
 		const requestOptions = {
 			cacheRetention: "none" as const,
-			maxTokens: Math.min(config.maxOutputTokens, model.maxTokens),
+			maxTokens,
 			sessionId: config.runId,
 			signal: operation.signal,
-			timeoutMs: config.timeoutMs,
+			...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
+			...(auth.headers === undefined ? {} : { headers: auth.headers }),
+			...(auth.env === undefined ? {} : { env: auth.env }),
 		};
-		let response: AssistantMessage;
-		if (typeof registry.complete === "function") {
-			response = await registry.complete(model, requestContext, requestOptions);
-		} else {
-			const auth = await registry.getApiKeyAndHeaders(model);
-			if (!auth.ok) throw new Error(auth.error);
-			const legacyModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
-			const headers = stringHeaders(auth.headers);
-			response = await compatComplete(legacyModel, requestContext, {
-				...requestOptions,
-				...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
-				...(headers === undefined ? {} : { headers }),
-				...(auth.env === undefined ? {} : { env: auth.env }),
-			});
-		}
+		const response = await completeCall(model, requestContext, requestOptions);
 		return {
 			errorMessage: response.errorMessage,
 			model: response.model,

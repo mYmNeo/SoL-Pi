@@ -2,8 +2,9 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { estimateTokens, sessionEntryToContextMessages, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import { estimateMessages, sessionEntryToContextMessages } from "../../host-compat.ts";
 
 /** ObservationPack changes tool-result content while preserving its call identity. */
 function messageKey(message: AgentMessage): string {
@@ -40,7 +41,7 @@ export function projectedEntryTokens(
 	for (const message of projected) {
 		const key = messageKey(message);
 		const sizes = visible.get(key) ?? [];
-		sizes.push(estimateTokens(message));
+		sizes.push(estimateMessages([message]));
 		visible.set(key, sizes);
 	}
 	const tokens = new Map<string, number>();

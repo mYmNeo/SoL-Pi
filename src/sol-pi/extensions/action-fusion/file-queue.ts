@@ -33,7 +33,7 @@ export function normalizeWindowsShellPath(filePath: string): string {
 
 export function resolveToolPath(cwd: string, filePath: string): string {
 	const stripped = normalizeWindowsShellPath(normalizeToolPath(filePath));
-	// Pi accepts file URLs; the queue and hash guard must use the same target.
+	// The host accepts file URLs; the queue and hash guard must use the same target.
 	const expanded = stripped.startsWith("file://") ? fileURLToPath(stripped) : stripped;
 	if (expanded === "~") return homedir();
 	if (expanded.startsWith("~/") || (process.platform === "win32" && expanded.startsWith("~\\"))) {
@@ -71,7 +71,7 @@ async function canonicalQueueKey(filePath: string): Promise<string> {
 
 /**
  * Serialize fused operations for one canonical file path. This queue belongs
- * to SoL-Pi and intentionally does not nest Pi's built-in mutation queue.
+ * to SoL-Pi and intentionally does not nest the host's built-in mutation queue.
  */
 export async function withFusedFileQueue<T>(filePath: string, work: () => Promise<T>): Promise<T> {
 	const key = await canonicalQueueKey(filePath);

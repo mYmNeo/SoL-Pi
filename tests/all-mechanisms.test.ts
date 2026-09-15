@@ -6,26 +6,29 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it, vi } from "vitest";
+import type { Context } from "@oh-my-pi/pi-ai";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import type { ExtensionContext, ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
+import { describe, expect, it, mock } from "bun:test";
 import { DEFAULT_CONFIG } from "../src/sol-pi/config.ts";
 import { REDUCER_RECEIPT_SCHEMA } from "../src/sol-pi/extensions/evidence-preserving-reducer/index.ts";
 import { createSolPiExtension, registerConfiguredFeatures } from "../src/sol-pi/index.ts";
 import { FakePi, fakeContext } from "./helpers.ts";
 
-const CUSTOM_REDUCER = {
+// The reducer's completion seam is omp's real `complete`, which dispatches on the
+// model's `api`; registering the mock provider is what lets a configured
+// mock-provider reducer model actually receive the request.
+registerMockApi();
+
+const CUSTOM_REDUCER = createMockModel({
 	id: "configured-reducer-model",
-	name: "configured reducer model",
-	api: "openai-responses",
 	provider: "configured-provider",
 	baseUrl: "https://example.invalid/v1",
 	reasoning: true,
-	input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 32_768,
 	maxTokens: 4_096,
-} satisfies Model<"openai-responses">;
+});
 
 function contextInput(context: Context): string {
 	const message = context.messages[0];
@@ -72,7 +75,6 @@ describe("SoL-Pi entrypoint", () => {
 
 		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["edit", "write", "obs_recall", "update_plan"]);
 		expect([...pi.handlers.keys()].sort()).toEqual([
-			"agent_settled",
 			"before_provider_request",
 			"context",
 			"input",
@@ -80,6 +82,7 @@ describe("SoL-Pi entrypoint", () => {
 			"session_compact",
 			"session_shutdown",
 			"session_start",
+			"session_stop",
 			"session_tree",
 			"tool_result",
 			"turn_end",
@@ -88,7 +91,7 @@ describe("SoL-Pi entrypoint", () => {
 
 	it("waits for a trusted session context and initializes once", async () => {
 		const pi = new FakePi();
-		const loader = vi.fn(() => ({ ...DEFAULT_CONFIG, observationPack: true }));
+		const loader = mock(() => ({ ...DEFAULT_CONFIG, observationPack: true }));
 		createSolPiExtension(loader)(pi.asExtensionApi());
 		expect([...pi.handlers.keys()]).toEqual(["session_start"]);
 
@@ -96,7 +99,7 @@ describe("SoL-Pi entrypoint", () => {
 		await pi.emit("session_start", { type: "session_start" }, ctx);
 		await pi.emit("session_start", { type: "session_start" }, ctx);
 
-		expect(loader).toHaveBeenCalledOnce();
+		expect(loader).toHaveBeenCalledTimes(1);
 		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["obs_recall"]);
 		expect([...pi.handlers.keys()].sort()).toEqual(["context", "session_start"]);
 	});
@@ -112,31 +115,23 @@ describe("SoL-Pi entrypoint", () => {
 				evidencePreservingReducerModel: CUSTOM_REDUCER.id,
 			});
 			const body = `ERROR configured reducer failure\n${"diagnostic line\n".repeat(360)}`;
-			let calledModel: Model<string> | undefined;
-			const context = fakeContext(root, {
-				modelRegistry: {
-					find: (provider: string, modelId: string) =>
-						provider === CUSTOM_REDUCER.provider && modelId === CUSTOM_REDUCER.id ? CUSTOM_REDUCER : undefined,
-					complete: async (model: Model<string>, request: Context): Promise<AssistantMessage> => {
-						calledModel = model;
-						const input = contextInput(request);
-						return {
-							role: "assistant",
+			// The reducer reaches the model through omp's real `complete`, which dispatches
+			// on the model's `api`. The configured reducer model is a mock-provider model,
+			// so scripting it is what proves the configured route was the one taken.
+			CUSTOM_REDUCER.reset();
+			CUSTOM_REDUCER.fallback = (request) => ({
 							content: [
 								{
 									type: "text",
 									text: JSON.stringify({
 										schema: REDUCER_RECEIPT_SCHEMA,
-										source_sha256: sourceHash(input),
+							source_sha256: sourceHash(contextInput(request)),
 										status: "failure",
 										uncertain: false,
 										evidence: [{ kind: "failure", quote: "ERROR configured reducer failure" }],
 									}),
 								},
 							],
-							api: model.api,
-							provider: model.provider,
-							model: model.id,
 							usage: {
 								input: 10,
 								output: 10,
@@ -146,9 +141,13 @@ describe("SoL-Pi entrypoint", () => {
 								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 							},
 							stopReason: "stop",
-							timestamp: Date.now(),
-						};
-					},
+			});
+			const context = fakeContext(root, {
+				modelRegistry: {
+					find: (provider: string, modelId: string) =>
+						provider === CUSTOM_REDUCER.provider && modelId === CUSTOM_REDUCER.id ? CUSTOM_REDUCER : undefined,
+					// omp's auth contract: a bare success carries no credentials.
+					getApiKeyAndHeaders: async () => ({ ok: true }),
 				} as unknown as ExtensionContext["modelRegistry"],
 			});
 
@@ -156,9 +155,14 @@ describe("SoL-Pi entrypoint", () => {
 				content: { type: string; text: string }[];
 			};
 
-			expect(calledModel).toBe(CUSTOM_REDUCER);
+			try {
+				expect(CUSTOM_REDUCER.calls).toHaveLength(1);
 			expect(result.content[0]?.text ?? "").toContain(`reducer_model=${CUSTOM_REDUCER.id}`);
 			expect(result.content[0]?.text ?? "").toContain(`reducer_provider=${CUSTOM_REDUCER.provider}`);
+			} finally {
+				CUSTOM_REDUCER.reset();
+				CUSTOM_REDUCER.fallback = undefined;
+			}
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
