@@ -2,10 +2,11 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { Text } from "@oh-my-pi/pi-tui";
+import { Type } from "@oh-my-pi/omptype/typebox";
+import { rendererArgs, themeOf } from "../../host-compat.ts";
 import { renderSolPiTool } from "../../tui.ts";
 import { PLAN_STATUSES, type PlanStep } from "./plan.ts";
 
@@ -51,13 +52,6 @@ export function registerOnlineTools(pi: ExtensionAPI, handlers: OnlineToolHandle
 		label: "Update plan",
 		description:
 			"Replace the complete working plan. A newly completed step becomes a safe point where SoL-Pi may compact context if doing so is economical.",
-		promptSnippet: "Keep the working plan current",
-		promptGuidelines: [
-			"Send the complete plan on every update_plan call.",
-			"Keep at most one step in_progress and mark finished steps completed.",
-			"When completing a step, include concise progress evidence when available.",
-		],
-		renderShell: "self",
 		parameters: Type.Object(
 			{
 				steps: Type.Array(planStepSchema, { minItems: 1, maxItems: 128 }),
@@ -65,7 +59,6 @@ export function registerOnlineTools(pi: ExtensionAPI, handlers: OnlineToolHandle
 			},
 			{ additionalProperties: false },
 		),
-		executionMode: "sequential",
 		execute: async (toolCallId, params, signal, _onUpdate, context) =>
 			await handlers.updatePlan({
 				toolCallId,
@@ -74,23 +67,29 @@ export function registerOnlineTools(pi: ExtensionAPI, handlers: OnlineToolHandle
 				signal,
 				context,
 			}),
-		renderCall(params, theme) {
-			const completed = params.steps.filter((step) => step.status === "completed").length;
+		// omp passes renderers (args, options, theme) / (result, options, theme, args),
+		// so the argument positions are normalized through rendererArgs/themeOf.
+		renderCall(args, options, theme) {
+			const ui = themeOf(rendererArgs([args, options, theme]).theme);
+			const completed = args.steps.filter((step) => step.status === "completed").length;
 			return renderSolPiTool(
-				theme,
+				ui,
 				"Online Context Compact",
 				"compacts only when projected savings are positive",
-				new Text(theme.fg("dim", `Plan: ${params.steps.length} steps, ${completed} completed`), 0, 0),
+				new Text(ui.fg("dim", `Plan: ${args.steps.length} steps, ${completed} completed`), 0, 0),
 			);
 		},
-		renderResult(result, { isPartial }, theme) {
+		renderResult(result, options, theme, args) {
+			const normalized = rendererArgs([result, options, theme, args]);
+			const ui = themeOf(normalized.theme);
+			const isPartial = (normalized.options as { isPartial?: boolean } | undefined)?.isPartial === true;
 			const boundary = (result.details as { boundary?: boolean } | undefined)?.boundary === true;
 			return renderSolPiTool(
-				theme,
+				ui,
 				"Online Context Compact",
 				"compacts only when projected savings are positive",
 				new Text(
-					theme.fg(isPartial ? "warning" : "dim", isPartial ? "Updating plan..." : boundary ? "Progress boundary recorded" : "Plan recorded"),
+					ui.fg(isPartial ? "warning" : "dim", isPartial ? "Updating plan..." : boundary ? "Progress boundary recorded" : "Plan recorded"),
 					0,
 					0,
 				),

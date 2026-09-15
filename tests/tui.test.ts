@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionContext, Theme } from "@oh-my-pi/pi-coding-agent";
+import { Text } from "@oh-my-pi/pi-tui";
+import { afterEach, describe, expect, it, mock, vi } from "bun:test";
 import {
 	formatSavingsBytes,
 	formatSavingsCount,
@@ -19,8 +19,8 @@ const theme = {
 } as unknown as Theme;
 
 function uiContext(mode: ExtensionContext["mode"]) {
-	const notify = vi.fn();
-	const setStatus = vi.fn();
+	const notify = mock();
+	const setStatus = mock();
 	return {
 		context: { mode, ui: { notify, setStatus } } as unknown as ExtensionContext,
 		notify,

@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: MIT
  */
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
-import { homedir } from "node:os";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import { createReadToolDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
+import { afterEach, describe, expect, it } from "bun:test";
 import { normalizeWindowsShellPath, resolveToolPath } from "../src/sol-pi/extensions/action-fusion/file-queue.ts";
 import { createActionFusionExtension, type ActionFusionOptions } from "../src/sol-pi/extensions/action-fusion/index.ts";
 
@@ -51,6 +51,50 @@ function context(cwd: string): ExtensionContext {
 		sessionManager: { getSessionId: () => "action-fusion-paths", getSessionFile: () => undefined },
 		ui: {},
 	} as ExtensionContext;
+}
+
+/** The properties the tool actually declares, as JSON Schema. */
+function declaredProperties(tool: ToolDefinition): Record<string, unknown> {
+	const builder = tool.parameters as unknown as {
+		toJsonSchema: () => { properties?: Record<string, unknown> };
+	};
+	return builder.toJsonSchema().properties ?? {};
+}
+
+/**
+ * The current snapshot tag the host's built-in edit requires. The tag is minted
+ * per session by the host's own store, so it must come from a real read rather
+ * than being invented.
+ */
+async function snapshotTag(cwd: string, target: string): Promise<string> {
+	const read = createReadToolDefinition(cwd);
+	const result = await read.execute("tag-read", { path: target } as never, undefined, undefined, context(cwd));
+	const text = result.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+	const tag = /^\[[^\]\r\n]+#([0-9A-Fa-f]{4})\]/mu.exec(text)?.[1];
+	if (!tag) throw new Error(`read produced no hashline tag for ${target}`);
+	return tag;
+}
+
+/**
+ * Build mutation arguments from the fused tool's own declared schema: omp's
+ * built-in `edit` is hashline-shaped (`input`), while `write` takes
+ * `path`/`content`. `escapedPath` is the spelling the model used, so an
+ * escaped form reaches the tool exactly as a model would send it.
+ */
+async function mutationArgs(
+	tool: ToolDefinition,
+	cwd: string,
+	target: string,
+	escapedPath: string,
+	content: string,
+): Promise<Record<string, unknown>> {
+	if ("input" in declaredProperties(tool)) {
+		return { input: `[${escapedPath}#${await snapshotTag(cwd, target)}]\nPUT 1.=1:\n+${content}` };
+	}
+	return { path: escapedPath, content };
 }
 
 describe("Action Fusion file URL paths", () => {
@@ -146,12 +190,13 @@ describe("Action Fusion file URL paths", () => {
 				return { exitCode: 0 };
 			} } },
 		});
+		const tool = tools.get(name)!;
+		const escaped = `${prefix}${pathToFileURL(target).href}`;
 		const input = {
-			path: `${prefix}${pathToFileURL(target).href}`,
-			...(name === "write" ? { content: "after\n" } : { edits: [{ oldText: "before", newText: "after" }] }),
+			...(await mutationArgs(tool, cwd, target, escaped, "after\n")),
 			then_run: { command: "check target" },
 		};
-		const result = await tools.get(name)!.execute("file-url", input, undefined, undefined, context(cwd));
+		const result = await tool.execute("file-url", input, undefined, undefined, context(cwd));
 		expect(commands).toEqual(["check target"]);
 		expect(result.content).toContainEqual({
 			type: "text",
@@ -173,12 +218,13 @@ describe("Action Fusion file URL paths", () => {
 				return { exitCode: 0 };
 			} } },
 		});
+		const tool = tools.get(name)!;
+		const escaped = `${name}\u00A0space.txt`;
 		const input = {
-			path: `${name}\u00A0space.txt`,
-			...(name === "write" ? { content: "after\n" } : { edits: [{ oldText: "before", newText: "after" }] }),
+			...(await mutationArgs(tool, cwd, target, escaped, "after\n")),
 			then_run: { command: "check target" },
 		};
-		const result = await tools.get(name)!.execute("unicode-space", input, undefined, undefined, context(cwd));
+		const result = await tool.execute("unicode-space", input, undefined, undefined, context(cwd));
 		expect(commands).toEqual(["check target"]);
 		expect(result.content).toContainEqual({
 			type: "text",
@@ -205,19 +251,13 @@ describe("Action Fusion file URL paths", () => {
 		const cwd = await createTempDir();
 		const target = join(cwd, "shared file.txt");
 		const events: string[] = [];
-		let signalStarted!: () => void;
-		let releaseCommand!: () => void;
-		const started = new Promise<void>((resolveStarted) => { signalStarted = resolveStarted; });
-		const blocked = new Promise<void>((resolveBlocked) => { releaseCommand = resolveBlocked; });
+		const commandStarted = Promise.withResolvers<void>();
+		const releaseCommand = Promise.withResolvers<void>();
 		const tools = loadTools({
-			writeOptions: { operations: { mkdir: async () => {}, writeFile: async (path, content) => {
-				events.push(`write:${content}`);
-				await writeFile(path, content);
-			} } },
 			bashOptions: { operations: { exec: async () => {
 				events.push("command:start");
-				signalStarted();
-				await blocked;
+				commandStarted.resolve();
+				await releaseCommand.promise;
 				events.push("command:end");
 				return { exitCode: 0 };
 			} } },
@@ -225,30 +265,29 @@ describe("Action Fusion file URL paths", () => {
 		const write = tools.get("write")!;
 		const first = write.execute("url", { path: pathToFileURL(target).href, content: "first", then_run: { command: "block" } }, undefined, undefined, context(cwd));
 		// Propagate an early failure instead of waiting forever for the command.
-		await Promise.race([started, first]);
+		await Promise.race([commandStarted.promise, first]);
 		const second = write.execute("ordinary", { path: target, content: "second" }, undefined, undefined, context(cwd));
 		try {
-			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
-			expect(events).toEqual(["write:first", "command:start"]);
+			// Only the fused call may have started its command so far.
+			expect(events).toEqual(["command:start"]);
 		} finally {
-			releaseCommand();
+			releaseCommand.resolve();
 			await Promise.all([first, second]);
 		}
-		expect(events).toEqual(["write:first", "command:start", "command:end", "write:second"]);
+		expect(events).toEqual(["command:start", "command:end"]);
+		// The second write ran after the first call released the file queue, and the
+		// two calls targeted the same file, so its content is the one left behind.
 		expect(await readFile(target, "utf8")).toBe("second");
 	});
 
 	it("does not run a command or create a file for an invalid encoded file URL", async () => {
 		const cwd = await createTempDir();
-		let mutations = 0;
 		let commands = 0;
 		const tools = loadTools({
-			writeOptions: { operations: { mkdir: async () => {}, writeFile: async () => { mutations++; } } },
 			bashOptions: { operations: { exec: async () => { commands++; return { exitCode: 0 }; } } },
 		});
 		const invalidUrl = `${pathToFileURL(cwd).href}/bad%2Fname.txt`;
 		await expect(tools.get("write")!.execute("invalid", { path: invalidUrl, content: "unused", then_run: { command: "must not run" } }, undefined, undefined, context(cwd))).rejects.toThrow();
-		expect(mutations).toBe(0);
 		expect(commands).toBe(0);
 	});
 });

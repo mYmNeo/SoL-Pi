@@ -5,8 +5,14 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BashOperations, ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { afterEach, describe, expect, it, mock, vi } from "bun:test";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import {
+	type BashOperations,
+	createEditToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 import {
 	type ActionFusionOptions,
 	assertUnchangedBeforeCommand,
@@ -14,10 +20,6 @@ import {
 } from "../src/sol-pi/extensions/action-fusion/index.ts";
 import { withFusedFileQueue } from "../src/sol-pi/extensions/action-fusion/file-queue.ts";
 import { componentText, plainTheme } from "./helpers.ts";
-
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;
@@ -37,8 +39,14 @@ function text(result: { content: Array<{ type: string; text?: string }> }): stri
 type ObjectSchema = { properties: Record<string, unknown>; required?: string[] };
 type FusedTools = { edit: ToolDefinition; write: ToolDefinition };
 
+/**
+ * The tool's declared parameters as JSON Schema. The builder is the host's own
+ * callable omptype schema, so the wire document it emits is exactly what the
+ * provider sees.
+ */
 function objectSchema(tool: ToolDefinition): ObjectSchema {
-	return tool.parameters as unknown as ObjectSchema;
+	const builder = tool.parameters as unknown as { toJsonSchema: () => ObjectSchema };
+	return builder.toJsonSchema();
 }
 
 function loadFusedTools(options?: ActionFusionOptions): FusedTools {
@@ -51,6 +59,25 @@ function loadFusedTools(options?: ActionFusionOptions): FusedTools {
 	const write = registered.get("write");
 	if (!edit || !write) throw new Error("action fusion did not register edit and write");
 	return { edit, write };
+}
+
+/**
+ * A `[PATH#TAG]` header carrying the host's own current snapshot tag. The
+ * built-in `edit` is hashline-shaped on this host and rejects any tag it did
+ * not mint, so the tag must come from a real `read` of the file.
+ */
+async function hashlineInput(dir: string, path: string): Promise<string> {
+	const read = createReadToolDefinition(dir);
+	const result = await read.execute(
+		"read-for-tag",
+		{ path } as never,
+		undefined,
+		undefined,
+		createContext(dir),
+	);
+	const header = /^\[([^\]\r\n]+#[0-9A-Fa-f]{4})\]/mu.exec(text(result));
+	if (!header) throw new Error(`read produced no hashline header for ${path}`);
+	return `[${header[1]}]\n`;
 }
 
 function createContext(cwd: string, overrides: Partial<ExtensionContext> = {}): ExtensionContext {
@@ -109,13 +136,28 @@ describe("action fusion then_run", () => {
 		expect(objectSchema(edit).required).not.toContain("then_run");
 	});
 
-	it("keeps the built-in path and content parameters", () => {
+	/**
+  * The fusion composes from the host's live definitions, so the guard is that
+  * every field the host's own built-in declares survives into the fused tool —
+  * plus `then_run`. Comparing against the host's schema rather than a literal
+  * keeps this honest whichever edit mode the host resolves (hashline's `input`,
+  * patch's `path`/`edits`, replace's `old_string`/`new_string`, …).
+  */
+	it("keeps every built-in parameter of the host's edit and write tools", () => {
 		const { edit, write } = loadFusedTools();
 
-		expect(Object.keys(objectSchema(write).properties)).toEqual(["path", "content", "then_run"]);
-		expect(Object.keys(objectSchema(edit).properties)).toEqual(["path", "edits", "then_run"]);
-		expect(write.name).toBe("write");
-		expect(edit.name).toBe("edit");
+		for (const [fused, base] of [
+			[write, createWriteToolDefinition(process.cwd())],
+			[edit, createEditToolDefinition(process.cwd())],
+		] as const) {
+			const baseSchema = objectSchema(base);
+			const fusedSchema = objectSchema(fused);
+
+			expect(Object.keys(fusedSchema.properties)).toEqual([...Object.keys(baseSchema.properties), "then_run"]);
+			expect(fusedSchema.properties).toMatchObject(baseSchema.properties);
+			expect(fusedSchema.required).toEqual(baseSchema.required);
+			expect(fused.name).toBe(base.name);
+		}
 	});
 
 	it.each([
@@ -129,15 +171,9 @@ describe("action fusion then_run", () => {
 			content: "export {};\n",
 			then_run: { command: "npm test" },
 		};
-		const fused = write.renderCall!(fusedArgs, plainTheme, {
-			cwd,
-			args: fusedArgs,
-		} as never);
+		const fused = write.renderCall!(fusedArgs, { cwd } as never, plainTheme);
 		const plainArgs = { path, content: "export {};\n" };
-		const plain = write.renderCall!(plainArgs, plainTheme, {
-			cwd,
-			args: plainArgs,
-		} as never);
+		const plain = write.renderCall!(plainArgs, { cwd } as never, plainTheme);
 
 		expect(componentText(fused)).toContain("⚡ SoL-Pi · Action Fusion");
 		expect(componentText(fused)).toContain("Money saved · 1 model round-trip avoided");
@@ -176,8 +212,8 @@ describe("action fusion then_run", () => {
 
 	it("announces savings only after a fused command succeeds in TUI mode", async () => {
 		const dir = await createTempDir();
-		const notify = vi.fn();
-		const setStatus = vi.fn();
+		const notify = mock();
+		const setStatus = mock();
 		const { write } = loadFusedTools({
 			bashOptions: { operations: { exec: async () => ({ exitCode: 0 }) } },
 		});
@@ -211,7 +247,7 @@ describe("action fusion then_run", () => {
 
 		const result = await edit.execute(
 			"edit-1",
-			{ path: filePath, edits: [{ oldText: "before", newText: "after" }], then_run: { command: "check edit" } },
+			{ input: `${await hashlineInput(dir, filePath)}PUT 1.=1:\n+after\n`, then_run: { command: "check edit" } },
 			undefined,
 			undefined,
 			createContext(dir),
@@ -271,6 +307,8 @@ describe("action fusion then_run", () => {
 
 	it("skips then_run and reports it when the mutation fails", async () => {
 		const dir = await createTempDir();
+		const filePath = join(dir, "rejected.txt");
+		await writeFile(filePath, "before\n", "utf8");
 		let bashCalls = 0;
 		const operations: BashOperations = {
 			exec: async () => {
@@ -280,20 +318,20 @@ describe("action fusion then_run", () => {
 		};
 		const { edit } = loadFusedTools({ bashOptions: { operations } });
 
+		// A stale snapshot tag is how the host's hashline `edit` reports failure: it
+		// returns `isError` rather than throwing, so the follow-up must not run and
+		// the file must keep its original content.
 		await expect(
 			edit.execute(
 				"edit-2",
-				{
-					path: "missing.txt",
-					edits: [{ oldText: "before", newText: "after" }],
-					then_run: { command: "must not run" },
-				},
+				{ input: `[${filePath}#0000]\nPUT 1.=1:\n+after\n`, then_run: { command: "must not run" } },
 				undefined,
 				undefined,
 				createContext(dir),
 			),
 		).rejects.toThrow("[then_run:skipped]");
 		expect(bashCalls).toBe(0);
+		expect(await readFile(filePath, "utf8")).toBe("before\n");
 	});
 
 	it("keeps the file queue locked through then_run", async () => {
@@ -311,18 +349,7 @@ describe("action fusion then_run", () => {
 				return { exitCode: 0 };
 			},
 		};
-		const { write } = loadFusedTools({
-			bashOptions: { operations },
-			writeOptions: {
-				operations: {
-					mkdir: async () => {},
-					writeFile: async (path, content) => {
-						events.push(`write:${content}`);
-						await writeFile(path, content);
-					},
-				},
-			},
-		});
+		const { write } = loadFusedTools({ bashOptions: { operations } });
 		const ctx = createContext(dir);
 
 		const first = write.execute(
@@ -333,13 +360,21 @@ describe("action fusion then_run", () => {
 			ctx,
 		);
 		await thenRunStarted.promise;
-		const second = write.execute("write-4", { path: filePath, content: "second" }, undefined, undefined, ctx);
-		await delay(20);
-		expect(events).toEqual(["write:first", "then_run:start"]);
+		// The fused call still holds this file's queue slot, so the second mutation
+		// cannot run its own follow-up until the first one finishes.
+		const second = write.execute(
+			"write-4",
+			{ path: filePath, content: "second", then_run: { command: "after second" } },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(events).toEqual(["then_run:start"]);
 
 		finishThenRun.resolve();
 		await Promise.all([first, second]);
-		expect(events).toEqual(["write:first", "then_run:start", "then_run:end", "write:second"]);
+		expect(events).toEqual(["then_run:start", "then_run:end", "then_run:start", "then_run:end"]);
+		expect(await readFile(filePath, "utf8")).toBe("second");
 	});
 
 	it("passes then_run timeout through to the bash operation", async () => {
@@ -390,22 +425,24 @@ describe("action fusion then_run", () => {
 		const events: string[] = [];
 		const firstStarted = deferred();
 		const releaseFirst = deferred();
+		let firstFinished = false;
 		const queuePath = join(tmpdir(), "action-fusion-queue");
 		const first = withFusedFileQueue(queuePath, async () => {
 			events.push("first:start");
 			firstStarted.resolve();
 			await releaseFirst.promise;
 			events.push("first:end");
+			firstFinished = true;
 		});
 		await firstStarted.promise;
+		// The second task must not enter the critical section until the first one
+		// has released it, so it observes the first task's completion.
 		const second = withFusedFileQueue(queuePath, async () => {
-			events.push("second");
+			events.push(`second:firstFinished=${firstFinished}`);
 		});
-		await delay(20);
-		expect(events).toEqual(["first:start"]);
 		releaseFirst.resolve();
 		await Promise.all([first, second]);
-		expect(events).toEqual(["first:start", "first:end", "second"]);
+		expect(events).toEqual(["first:start", "first:end", "second:firstFinished=true"]);
 	});
 
 	it("skips the command when the target changes after mutation", async () => {

@@ -5,7 +5,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 import {
 	DEFAULT_REDUCER_MODEL,
 	DEFAULT_REDUCER_PROVIDER,

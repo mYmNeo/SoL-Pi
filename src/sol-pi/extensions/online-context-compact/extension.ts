@@ -2,16 +2,19 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
-import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {
 	buildSessionContext,
-	estimateTokens,
-	findCutPoint,
-	sessionEntryToContextMessages,
 	type ExtensionContext,
 	type ExtensionFactory,
 	type SessionEntry,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
+import {
+	estimateMessages,
+	findCutPoint,
+	sessionEntryToContextMessages,
+	systemPromptText,
+} from "../../host-compat.ts";
 import { formatSavingsCount, showSolPiSavings } from "../../tui.ts";
 import {
 	DEFAULT_COMPACTION_ECONOMICS,
@@ -39,6 +42,12 @@ export const BOUNDARY_COMPACTION_INSTRUCTIONS =
 export const POST_COMPACTION_PLAN_REMINDER =
 	"Online context compaction finished. The parent task is still active. " +
 	"Before continuing work, call update_plan with a fresh plan for the remaining work.";
+// omp's session_stop handler must return inside a 30 second budget, so the
+// continuation resumes while the boundary compaction is still running. The
+// wording must not claim the rewrite already finished.
+export const PENDING_COMPACTION_PLAN_REMINDER =
+	"Online context compaction is in progress. The parent task is still active. " +
+	"Before continuing work, call update_plan with a fresh plan for the remaining work.";
 
 export type OnlineContextCompactOptions = {
 	readonly cacheWriteReadRatio?: number | null;
@@ -48,7 +57,6 @@ export type OnlineContextCompactOptions = {
 type PendingBoundary = { readonly toolCallId: string };
 type SelectedCompaction = { readonly decision: CompactionDecision };
 type CacheDebt = { readonly debtTokens: number; readonly repaymentTokens: number };
-type PendingContinuation = { readonly promise: Promise<void>; readonly resolve: () => void };
 
 export function resolveKeepRecentTokens(value: number | undefined): number {
 	const resolved = value ?? DEFAULT_KEEP_RECENT_TOKENS;
@@ -96,39 +104,12 @@ function compactionMessageCount(entries: readonly SessionEntry[], startIndex: nu
 	return count;
 }
 
-function branchAfterAbort(entries: readonly SessionEntry[]): SessionEntry[] {
-	const last = entries.at(-1);
-	const markerProvider = ["sol", "pi"].join("-");
-	return [
-		...entries,
-		{
-			type: "message",
-			id: "sol-pi-online-context-compact-abort-marker",
-			parentId: last?.id ?? null,
-			timestamp: new Date(0).toISOString(),
-			message: {
-				role: "assistant",
-				content: [],
-				api: markerProvider,
-				provider: markerProvider,
-				model: "aborted",
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "aborted",
-				timestamp: 0,
-			},
-		} as SessionEntry,
-	];
-}
-
+/// Whether the native cut-point search can free history at all. Evaluated on the
+/// real branch: the boundary runs on a natural stop, so the branch ends on the
+/// ordinary assistant turn plus its tool results — there is no aborted terminal
+/// turn to model.
 function nativeCompactionFeasible(entries: readonly SessionEntry[], keepRecentTokens: number): boolean {
-	const path = branchAfterAbort(entries);
+	const path = [...entries];
 	let startIndex = 0;
 	for (let index = path.length - 1; index >= 0; index--) {
 		const entry = path[index];
@@ -163,20 +144,9 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		let pendingBoundary: PendingBoundary | undefined;
 		let selected: SelectedCompaction | undefined;
 		let activeDebt: CacheDebt | undefined;
-		let nextContinuation: PendingContinuation | undefined;
 		let compactionInFlight = false;
 
-		const releaseContinuation = (): void => {
-			const continuation = nextContinuation;
-			nextContinuation = undefined;
-			continuation?.resolve();
-		};
-		const releaseParentContinuation = (continuation: PendingContinuation | undefined): void => {
-			if (continuation) setTimeout(continuation.resolve, 0);
-		};
-
 		const restore = (context: ExtensionContext): void => {
-			releaseContinuation();
 			state = restoreOnlineState(context.sessionManager.getBranch());
 			restored = true;
 			observedMessages = buildSessionContext(
@@ -192,9 +162,52 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			if (!restored) restore(context);
 		};
 		const save = (): void => appendOnlineState(pi, state);
+		// omp's compact() returns Promise<void> that can reject IN ADDITION to
+		// invoking onError, so both channels are claimed through one `settle` and
+		// the rejection is always handled — an unhandled rejection here would
+		// otherwise escape as a process-fatal event.
+		const startBoundaryCompaction = (context: ExtensionContext, pending: SelectedCompaction): void => {
+			let outcomeClaimed = false;
+			const claim = (): boolean => {
+				if (outcomeClaimed) return false;
+				outcomeClaimed = true;
+				return true;
+			};
+			const settle = (error: Error | undefined): void => {
+				compactionInFlight = false;
+				activeDebt = undefined;
+				if (!error || error.name === "AbortError" || error.message === "Compaction cancelled") return;
+				pi.logger.error("Online Context Compact boundary compaction failed", {
+					error: error.message,
+				});
+			};
+			const promise = context.compact({
+				internalGuidance: BOUNDARY_COMPACTION_INSTRUCTIONS,
+				onComplete: (compaction) => {
+					if (!claim()) return;
+					const removed = Math.max(0, pending.decision.archiveTokens - tokenEstimate(compaction.summary));
+					if (removed > 0) {
+						showSolPiSavings(
+							context,
+							"Online Context Compact",
+							formatSavingsCount(removed, "context tokens removed"),
+						);
+					}
+					settle(undefined);
+				},
+				onError: (error) => {
+					if (!claim()) return;
+					settle(error);
+				},
+			});
+			void promise.catch((error: unknown) => {
+				if (!claim()) return;
+				settle(error instanceof Error ? error : new Error(String(error)));
+			});
+		};
 		const contextTokens = (context: ExtensionContext): number => {
-			const visible = observedMessages.reduce((total, message) => total + estimateTokens(message), 0);
-			const estimated = visible + tokenEstimate(context.getSystemPrompt());
+			const visible = estimateMessages(observedMessages);
+			const estimated = visible + tokenEstimate(systemPromptText(context));
 			const reported = context.getContextUsage()?.tokens;
 			return validPositiveInteger(reported) ? Math.max(reported, estimated) : estimated;
 		};
@@ -244,17 +257,21 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			save();
 		});
 
+		// omp's InputEvent carries no streaming-behavior field; its `source` is
+		// "interactive" | "rpc" | "extension", and the result shape is
+		// { handled?, text?, images? }. Returning undefined passes the turn
+		// through untouched, which is what the pass-through case wants: `handled`
+		// would short-circuit sibling extensions, and `text` would rewrite the
+		// user's prompt since omp chains each extension's replacement text.
 		pi.on("input", (event, context) => {
-			if (event.streamingBehavior !== "steer" && !event.text.startsWith("CORRECTION:")) {
-				return { action: "continue" as const };
-			}
+			if (event.source !== "interactive" && !event.text.startsWith("CORRECTION:")) return undefined;
 			ensureRestored(context);
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
 			state = recordCorrection(state);
 			save();
-			return { action: "continue" as const };
+			return undefined;
 		});
 
 		pi.on("turn_end", (event, context) => {
@@ -266,7 +283,6 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				event.message.role !== "assistant" ||
 				event.message.stopReason === "error" ||
 				event.message.stopReason === "aborted" ||
-				context.signal?.aborted ||
 				!toolResult ||
 				toolResult.isError
 			) {
@@ -275,7 +291,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 
 			const usage = context.getContextUsage();
 			const writeTokens = contextTokens(context);
-			const fixedTokens = tokenEstimate(context.getSystemPrompt());
+			const fixedTokens = tokenEstimate(systemPromptText(context));
 			const archiveTokens = Math.max(0, writeTokens - fixedTokens - keepRecentTokens);
 			const contextWindowTokens = validPositiveInteger(usage?.contextWindow)
 				? usage.contextWindow
@@ -307,112 +323,40 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					: priced;
 			if (!decision.compact) return;
 
+			// Record the selection only. The run is deliberately NOT aborted: on
+			// omp an aborted assistant stop takes the host's aborted fast path,
+			// which returns before the `session_stop` dispatch, so an
+			// extension-initiated abort would swallow the settle hook that has to
+			// start the compaction. Letting the turn end naturally is what carries
+			// the selection to `session_stop`.
 			selected = { decision };
-			context.abort();
 		});
 
-		pi.on("agent_settled", async (_event, context) => {
-			// sendMessage() starts a turn without returning its promise. Capture the
-			// child settlement so print/JSON mode cannot dispose while it is running.
-			const parentContinuation = nextContinuation;
-			nextContinuation = undefined;
+		// omp's settle/continuation hook, and the only continuation-capable event
+		// on this host. There is no upstream settled event, and a registration
+		// under that old name would be stored but never fire. Returning
+		// `{ continue: true, additionalContext }` IS the resume mechanism, so this
+		// path must NOT also call pi.sendMessage — that would resume twice. The
+		// handler also must not await the compaction: omp caps every non-shutdown
+		// handler at 30 seconds and discards an overrun handler's result, so the
+		// compaction is started and the return value produced immediately.
+		pi.on("session_stop", (_event, context) => {
 			const pending = selected;
 			selected = undefined;
-			if (!context.isIdle()) {
-				selected = pending;
-				nextContinuation = parentContinuation;
-				return;
-			}
-			if (!pending) {
-				releaseParentContinuation(parentContinuation);
-				return;
-			}
+			if (!pending || compactionInFlight) return undefined;
 
 			activeDebt = {
 				debtTokens: pending.decision.writeTokens * (pending.decision.incrementalCacheCostRatio ?? 0),
 				repaymentTokens: Math.max(0, pending.decision.archiveTokens - pending.decision.memoTokens),
 			};
-			let compacted = false;
-			let compactionError: Error | undefined;
-			try {
 				compactionInFlight = true;
-				await new Promise<void>((resolve) => {
-					let finished = false;
-					const finish = (): void => {
-						if (finished) return;
-						finished = true;
-						resolve();
-					};
-					context.compact({
-						customInstructions: BOUNDARY_COMPACTION_INSTRUCTIONS,
-						onComplete: (compaction) => {
-							try {
-								compacted = true;
-								const removed = Math.max(
-									0,
-									pending.decision.archiveTokens - tokenEstimate(compaction.summary),
-								);
-								if (removed > 0) {
-									showSolPiSavings(
-										context,
-										"Online Context Compact",
-										formatSavingsCount(removed, "context tokens removed"),
-									);
-								}
-							} finally {
-								finish();
-							}
-						},
-						onError: (error) => {
-							compactionError = error;
-							finish();
-						},
-					});
-				});
-				compactionInFlight = false;
-				if (
-					compactionError &&
-					compactionError.name !== "AbortError" &&
-					compactionError.message !== "Compaction cancelled"
-				) {
-					throw compactionError;
-				}
-
-				if (compacted) {
-					let resolveContinuation!: () => void;
-					const continuation: PendingContinuation = {
-						promise: new Promise<void>((resolve) => {
-							resolveContinuation = resolve;
-						}),
-						resolve: () => resolveContinuation(),
-					};
-					nextContinuation = continuation;
-					try {
-						pi.sendMessage(
-							{
-								customType: "sol-pi-online-context-compact",
-								content: POST_COMPACTION_PLAN_REMINDER,
-								display: false,
-							},
-							{ triggerTurn: true },
-						);
-					} catch (error) {
-						if (nextContinuation === continuation) nextContinuation = undefined;
-						continuation.resolve();
-						throw error;
-					}
-					if (context.isIdle() && nextContinuation === continuation) {
-						nextContinuation = undefined;
-						continuation.resolve();
-						throw new Error("Online context compact continuation did not start");
-					}
-					await continuation.promise;
-				}
-			} finally {
-				compactionInFlight = false;
-				activeDebt = undefined;
-				releaseParentContinuation(parentContinuation);
-			}
+			// Started on a later macrotask rather than inline: context.compact()
+			// aborts the session synchronously, and an abort raised before this
+			// handler returns invalidates the very continuation we are about to
+			// return (omp discards a session_stop result once promptGeneration has
+			// moved). The managed timer is cleared on session_shutdown.
+			context.setTimeout(() => startBoundaryCompaction(context, pending), 0);
+			return { continue: true, additionalContext: PENDING_COMPACTION_PLAN_REMINDER };
 		});
 
 		pi.on("session_compact", (event, context) => {
@@ -432,7 +376,6 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("session_shutdown", () => {
-			releaseContinuation();
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import { loadSolPiConfig, type SolPiConfig } from "./config.ts";
 import { registerActionFusion } from "./extensions/action-fusion/index.ts";
 import { registerEvidencePreservingReducer } from "./extensions/evidence-preserving-reducer/index.ts";
@@ -25,7 +25,9 @@ export function registerConfiguredFeatures(pi: ExtensionAPI, config: SolPiConfig
 export type SolPiConfigLoader = (ctx: ExtensionContext) => SolPiConfig;
 
 export function createSolPiExtension(
-	loadConfig: SolPiConfigLoader = (ctx) => loadSolPiConfig(ctx.cwd, getAgentDir(), ctx.isProjectTrusted()),
+	// omp trusts project-local inputs unconditionally and exposes no per-directory trust gate,
+	// so the project-config allowance is always open on this host.
+	loadConfig: SolPiConfigLoader = (ctx) => loadSolPiConfig(ctx.cwd, getAgentDir(), true),
 ): ExtensionFactory {
 	return (pi) => {
 		let initialized = false;
