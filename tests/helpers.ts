@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, SessionEntry, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import type { Component } from "@oh-my-pi/pi-tui";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 

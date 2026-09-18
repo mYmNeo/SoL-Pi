@@ -21,7 +21,7 @@
 
 SoL-Pi is a standalone extension for oh-my-pi that packages four reusable efficiency mechanisms discovered through scaled auto-research loops. It reduces repeated model turns, context replay, oversized observations, and unnecessary long-log reading while preserving the work and evidence an agent needs to finish a task.
 
-SoL-Pi runs on top of an unmodified `omp` 18.2.0 release. Every mechanism is opt-in and disabled by default.
+SoL-Pi runs on top of an unmodified `omp` 18.2.5 release. Every mechanism is opt-in and disabled by default.
 
 ## Introduction
 
@@ -60,7 +60,7 @@ Read our paper: [SoL-Pi: Recursively Scaling Auto-Research Loops for Efficient A
 ### Requirements
 
 - Bun 1.3.14 or newer
-- [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) 18.2.0, distributed as `@oh-my-pi/pi-coding-agent@18.2.0`
+- [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) 18.2.5, distributed as `@oh-my-pi/pi-coding-agent@18.2.5`
 - Node.js 22.19 or newer, only to run the standalone repository scripts (`scripts/check-omp-compat.mjs`, `scripts/check-sol-pi-config.mjs`)
 
 `omp` distributes its runtime packages as raw TypeScript and is a Bun-only runtime; Node cannot import them.
@@ -70,7 +70,7 @@ Read our paper: [SoL-Pi: Recursively Scaling Auto-Research Loops for Efficient A
 Install the tested oh-my-pi release:
 
 ```bash
-bun install --global @oh-my-pi/pi-coding-agent@18.2.0
+bun install --global @oh-my-pi/pi-coding-agent@18.2.5
 omp --version
 ```
 
@@ -159,7 +159,7 @@ bun audit --audit-level=high
 node scripts/check-omp-compat.mjs
 ```
 
-`bun run check` covers TypeScript and the complete test suite. The development dependency set is pinned to oh-my-pi 18.2.0; the runtime packages remain peer dependencies so `omp` owns their installation and upgrades.
+`bun run check` covers TypeScript and the complete test suite. The development dependency set is pinned to oh-my-pi 18.2.5; the runtime packages remain peer dependencies so `omp` owns their installation and upgrades.
 
 ## Project Status
 

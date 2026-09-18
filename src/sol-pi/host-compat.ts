@@ -33,9 +33,10 @@
  */
 
 import * as agentCore from "@oh-my-pi/pi-agent-core";
-import type { ExtensionContext, SessionEntry, Theme } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 
-export type { Theme } from "@oh-my-pi/pi-coding-agent";
+export type { Theme } from "@oh-my-pi/pi-tui/theme";
 export type { AgentMessage, CutPointResult } from "@oh-my-pi/pi-agent-core";
 
 /** Crude byte-to-token ratio used by the degraded path when no tokenizer exists. */
