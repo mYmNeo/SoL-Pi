@@ -32,7 +32,7 @@ export type CompatComplete = (
 /**
  * Authentication material the host resolves for one reducer request.
  *
- * Mirrors `ModelRegistry.getApiKeyAndHeaders` on omp 18.2.0: it reports no
+ * Mirrors `ModelRegistry.getApiKeyAndHeaders` on omp 18.2.5: it reports no
  * `baseUrl`, and its `headers` are already null-free, so both pass straight
  * through.
  */

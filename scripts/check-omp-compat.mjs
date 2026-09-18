@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OMP_SCOPE = "@oh-my-pi";
-const REQUIRED_VERSION = "18.2.0";
+const REQUIRED_VERSION = "18.2.5";
 const HOST_PACKAGES = ["pi-agent-core", "pi-ai", "pi-coding-agent", "pi-tui", "pi-utils", "omptype"];
 const PACKAGE_ENTRY = "./src/sol-pi/index.ts";
 const MECHANISM_ENTRIES = [

@@ -8,12 +8,12 @@ The following packages are supplied by the user's oh-my-pi runtime and retain th
 
 | Package | Development-tested version | License | Source |
 |---|---:|---|---|
-| `@oh-my-pi/pi-agent-core` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
-| `@oh-my-pi/pi-ai` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
-| `@oh-my-pi/pi-coding-agent` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
-| `@oh-my-pi/pi-tui` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
-| `@oh-my-pi/pi-utils` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
-| `@oh-my-pi/omptype` | 18.2.0 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-agent-core` | 18.2.5 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-ai` | 18.2.5 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-coding-agent` | 18.2.5 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-tui` | 18.2.5 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/pi-utils` | 18.2.5 | MIT | <https://github.com/can1357/oh-my-pi> |
+| `@oh-my-pi/omptype` | 18.2.5 | MIT | <https://github.com/can1357/oh-my-pi> |
 
 These packages ship raw TypeScript and are loaded by Bun; `omp` owns their installation and upgrades. `@oh-my-pi/omptype` supplies the `Type.*` schema builders used for tool parameters; `omp` also injects a TypeBox facade at `pi.typebox`, but this extension imports omptype directly.
 

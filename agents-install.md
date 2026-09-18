@@ -8,7 +8,7 @@ Installation and configuration are complete only when oh-my-pi remains unmodifie
 
 - Do not modify, patch, fork, or vendor oh-my-pi. SoL-Pi must load as a standalone extension through `omp`'s public extension interface.
 - **oh-my-pi only.** Upstream Pi is no longer supported: do not add an upstream Pi package specifier, a Pi dependency, a bare `typebox` specifier, or a Pi-era `.pi` configuration path anywhere in the checkout.
-- Use Bun 1.3.14 or newer and the tested oh-my-pi release `@oh-my-pi/pi-coding-agent@18.2.0` (`omp` 18.2.0). Node.js 22.19 or newer is required only to run the standalone repository scripts. Treat a different `omp` version as a compatibility change and rerun the full suite before using it.
+- Use Bun 1.3.14 or newer and the tested oh-my-pi release `@oh-my-pi/pi-coding-agent@18.2.5` (`omp` 18.2.5). Node.js 22.19 or newer is required only to run the standalone repository scripts. Treat a different `omp` version as a compatibility change and rerun the full suite before using it.
 - Do not clean, reset, switch, or overwrite unrelated repository changes.
 - Do not print, log, commit, upload, or include any secret in a command line. Check only whether a credential is present.
 - Keep SoL-Pi settings in `sol-pi.json`. The Evidence-Preserving Reducer provider/model route is a SoL-Pi setting; provider URLs, credentials, the main agent model, and shell behavior remain `omp` settings.
@@ -46,7 +46,7 @@ node scripts/check-omp-compat.mjs
 bun test tests/all-mechanisms.test.ts
 ```
 
-`bun run check` covers type checking and the complete test suite. `bun test tests/all-mechanisms.test.ts` confirms that one all-enabled configuration registers all four mechanisms against the host's public extension API. `node scripts/check-omp-compat.mjs` verifies that the installed `@oh-my-pi/*` packages are exactly 18.2.0, that `package.json` declares `omp.extensions` pointing at `src/sol-pi/index.ts`, that no upstream Pi specifier remains under `src/`, and that all four mechanism entrypoints exist. The test suite runs without a model provider.
+`bun run check` covers type checking and the complete test suite. `bun test tests/all-mechanisms.test.ts` confirms that one all-enabled configuration registers all four mechanisms against the host's public extension API. `node scripts/check-omp-compat.mjs` verifies that the installed `@oh-my-pi/*` packages are exactly 18.2.5, that `package.json` declares `omp.extensions` pointing at `src/sol-pi/index.ts`, that no upstream Pi specifier remains under `src/`, and that all four mechanism entrypoints exist. The test suite runs without a model provider.
 
 Stop if any command fails. Do not hide a failure with `|| true` or replace `bun install --frozen-lockfile` with an unlocked install.
 
@@ -55,11 +55,11 @@ Stop if any command fails. Do not hide a failure with `|| true` or replace `bun 
 Install the tested oh-my-pi release without changing its source:
 
 ```bash
-bun install --global @oh-my-pi/pi-coding-agent@18.2.0
+bun install --global @oh-my-pi/pi-coding-agent@18.2.5
 omp --version
 ```
 
-Require `omp --version` to report `18.2.0`.
+Require `omp --version` to report `18.2.5`.
 
 For a user-wide registration, run this from `target_project` and substitute the resolved absolute `sol_pi_root`. Linking a local path keeps the checkout as the live extension source:
 

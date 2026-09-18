@@ -22,10 +22,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionFactory,
 	Settings,
-	type Theme,
 	type ToolSession,
-	editToolRenderer,
-	writeToolRenderer,
 } from "@oh-my-pi/pi-coding-agent";
 import {
 	type BashToolOptions,
@@ -38,6 +35,8 @@ import {
 // the value boundary where the two instances above must agree.
 import { type AnySchema } from "@oh-my-pi/omptype/typebox";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { type ToolRenderer, toolRenderers } from "@oh-my-pi/pi-tui/tools";
 import { rendererArgs, themeOf } from "../../host-compat.ts";
 import { renderSolPiTool, showSolPiSavings } from "../../tui.ts";
 import { resolveToolPath } from "./file-queue.ts";
@@ -209,7 +208,19 @@ function fallbackCall(label: string, target: string, theme: Theme): Component {
 	return new Text(theme.fg("toolTitle", theme.bold(`${label} ${path}`)), 0, 0);
 }
 
-type CanonicalRenderer = typeof editToolRenderer | typeof writeToolRenderer;
+/**
+ * The host's canonical renderer for a tool this extension replaces.
+ *
+ * omp 18.2.5 moved the tool renderers out of `@oh-my-pi/pi-coding-agent` into
+ * `@oh-my-pi/pi-tui`, whose root barrel does not re-export them. A compiled
+ * `omp` serves that package through its bundled `tools` barrel only: the
+ * individual `tools/*` modules resolve under `bun test` but fail to load in a
+ * real run, because the bundled host graph reaches them through an unresolvable
+ * transitive edge. The registry the transcript itself renders from is therefore
+ * the supported source. A lookup that finds nothing is not fatal — the callers
+ * below fall back to their own header or the result's text.
+ */
+type CanonicalRenderer = ToolRenderer;
 
 /**
  * Wrap the host's canonical renderer for a mutated tool, prefixing the SoL-Pi
@@ -220,18 +231,27 @@ type CanonicalRenderer = typeof editToolRenderer | typeof writeToolRenderer;
  * a positional render context, because `renderCall` gets `(args, options,
  * theme)` and `renderResult` gets `(result, options, theme, args)`.
  */
-function fusedCall(renderer: CanonicalRenderer, label: string, target: string, hostArgs: readonly unknown[]): Component {
+function fusedCall(
+	renderer: CanonicalRenderer | undefined,
+	label: string,
+	target: string,
+	hostArgs: readonly unknown[],
+): Component {
 	const { theme, options } = rendererArgs(hostArgs);
 	const resolved = themeOf(theme);
-	const base = safeRender(renderer.renderCall, [hostArgs[0], options, resolved]);
+	const base =
+		renderer === undefined ? undefined : safeRender(renderer.renderCall, [hostArgs[0], options, resolved]);
 	if (thenRunRequested(hostArgs[0])) return renderSolPiTool(resolved, "Action Fusion", SAVINGS, base);
 	return base ?? fallbackCall(label, target, resolved);
 }
 
-function fusedResult(renderer: CanonicalRenderer, hostArgs: readonly unknown[]): Component {
+function fusedResult(renderer: CanonicalRenderer | undefined, hostArgs: readonly unknown[]): Component {
 	const { theme, options, context } = rendererArgs(hostArgs);
 	const resolved = themeOf(theme);
-	const base = safeRender(renderer.renderResult, [hostArgs[0], options, resolved, context]);
+	const base =
+		renderer === undefined
+			? undefined
+			: safeRender(renderer.renderResult, [hostArgs[0], options, resolved, context]);
 	if (thenRunRequested(context)) return renderSolPiTool(resolved, "Action Fusion", SAVINGS, base);
 	// A result that renders nothing would drop the model-visible output, so fall
 	// back to the result's own text.
@@ -249,6 +269,8 @@ export function createActionFusionExtension(options: ActionFusionOptions = {}): 
 	return (pi: ExtensionAPI) => {
 		const editParameters = withThenRun(baseEdit(process.cwd()).parameters, EDIT_THEN_RUN_DESCRIPTION);
 		const writeParameters = withThenRun(baseWrite(process.cwd()).parameters, WRITE_THEN_RUN_DESCRIPTION);
+		const editRenderer = toolRenderers["edit"];
+		const writeRenderer = toolRenderers["write"];
 
 		pi.registerTool({
 			...baseEdit(process.cwd()),
@@ -274,8 +296,8 @@ export function createActionFusionExtension(options: ActionFusionOptions = {}): 
 				}
 				return result;
 			},
-			renderCall: (...hostArgs) => fusedCall(editToolRenderer, "edit", editTargetLabel(hostArgs[0]), hostArgs),
-			renderResult: (...hostArgs) => fusedResult(editToolRenderer, hostArgs),
+			renderCall: (...hostArgs) => fusedCall(editRenderer, "edit", editTargetLabel(hostArgs[0]), hostArgs),
+			renderResult: (...hostArgs) => fusedResult(editRenderer, hostArgs),
 		});
 
 		pi.registerTool({
@@ -302,8 +324,8 @@ export function createActionFusionExtension(options: ActionFusionOptions = {}): 
 				return result;
 			},
 			renderCall: (...hostArgs) =>
-				fusedCall(writeToolRenderer, "write", writeTargetPath(hostArgs[0]) ?? "", hostArgs),
-			renderResult: (...hostArgs) => fusedResult(writeToolRenderer, hostArgs),
+				fusedCall(writeRenderer, "write", writeTargetPath(hostArgs[0]) ?? "", hostArgs),
+			renderResult: (...hostArgs) => fusedResult(writeRenderer, hostArgs),
 		});
 	};
 }

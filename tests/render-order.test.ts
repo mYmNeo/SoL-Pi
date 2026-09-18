@@ -20,8 +20,9 @@
  * read fails loudly and a no-op/fallback theme cannot masquerade as a pass.
  */
 
-import type { ExtensionAPI, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { createTheme, loadThemeJsonSync } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
+import type { ExtensionAPI, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { createTheme, loadThemeJsonSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { describe, expect, it } from "bun:test";
 import { createActionFusionExtension, type ActionFusionOptions } from "../src/sol-pi/extensions/action-fusion/index.ts";
 import { createObservationPackExtension } from "../src/sol-pi/extensions/observation-pack/index.ts";
