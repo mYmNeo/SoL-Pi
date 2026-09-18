@@ -17,7 +17,7 @@ Online Context Compact is off by default. When enabled, every `update_plan` call
 
 The extension creates no sidecar, attestation, payload-capture, or research-instrumentation files. State entries do not enter the model context; only the generic post-compaction reminder does. Deleting the `omp` session removes both kinds of persisted Online Context Compact data.
 
-Evidence-Preserving Reducer reads the log text carried by the public `tool_result` event and copies eligible content into the session-specific archive under `<sessionDir>/sol-pi/<sessionId>/` before any nested model call. As a guarded fallback for exact bytes, it may also read a path named by the result's `fullOutputPath` detail or by an inline `Full output: <path>` marker — but only when that path is a regular, non-symlink `pi-bash-*.log` file directly inside the operating system's temporary directory. oh-my-pi 18.2.0 produces no such files (its bash tool does not spill oversized output to the temp directory), so this branch is a bounded legacy guard rather than a live source.
+Evidence-Preserving Reducer reads the log text carried by the public `tool_result` event and copies eligible content into the session-specific archive under `<sessionDir>/sol-pi/<sessionId>/` before any nested model call. As a guarded fallback for exact bytes, it may also read a path named by the result's `fullOutputPath` detail or by an inline `Full output: <path>` marker — but only when that path is a regular, non-symlink `pi-bash-*.log` file directly inside the operating system's temporary directory. oh-my-pi 18.2.5 produces no such files (its bash tool does not spill oversized output to the temp directory), so this branch is a bounded legacy guard rather than a live source.
 
 ## Reporting a vulnerability
 

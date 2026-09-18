@@ -4,7 +4,8 @@
  */
 
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ExtensionContext, SessionEntry, Theme } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { describe, expect, it } from "bun:test";
 import {
 	estimateMessages,
