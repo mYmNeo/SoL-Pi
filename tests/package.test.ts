@@ -7,19 +7,23 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "bun:test";
 
-interface PackReport {
-	files: Array<{ path: string }>;
-}
-
 function packedFiles(): string[] {
-	const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+	// The supported toolchain is bun; `npm` is not required to be installed.
+	// `bun pm pack --dry-run` prints one `packed <size> <path>` line per file.
+	const result = spawnSync("bun", ["pm", "pack", "--dry-run"], {
 		cwd: process.cwd(),
 		encoding: "utf8",
 		timeout: 25_000,
 	});
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout);
-	const report = JSON.parse(result.stdout) as PackReport[];
-	return report[0]?.files.map((file) => file.path) ?? [];
+	if (result.status !== 0) {
+		throw new Error(result.stderr || result.stdout || result.error?.message || "bun pm pack failed");
+	}
+	return result.stdout
+		.split("\n")
+		.flatMap((line) => {
+			const path = /^packed\s+\S+\s+(.+)$/u.exec(line)?.[1];
+			return path ? [path] : [];
+		});
 }
 
 describe("published package", () => {
