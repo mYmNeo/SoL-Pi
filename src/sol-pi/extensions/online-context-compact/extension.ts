@@ -290,15 +290,31 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		pi.on("session_before_tree", () => (compactionInFlight ? { cancel: true } : undefined));
 		pi.on("session_tree", (_event, context) => restore(context));
 
-		pi.on("context", (event, context) => {
-			ensureRestored(context);
-			observedMessages = [...event.messages];
-		});
-
-		pi.on("before_provider_request", (_event, context) => {
+		// `context` runs for every provider-bound projection. `before_provider_request`
+		// is the same request on the CLI path, but in-process mock sessions never
+		// emit it, so the projection has to count the request itself. Whichever
+		// arrives first counts; the other half of the pair must not count again.
+		let providerRequestCounted = false;
+		const noteProviderRequest = (context: ExtensionContext): void => {
 			ensureRestored(context);
 			state = recordProviderRequest(state, contextTokens(context));
 			save();
+			providerRequestCounted = true;
+		};
+
+		pi.on("context", (event, context) => {
+			ensureRestored(context);
+			observedMessages = [...event.messages];
+			noteProviderRequest(context);
+		});
+
+		pi.on("before_provider_request", (_event, context) => {
+			if (providerRequestCounted) {
+				providerRequestCounted = false;
+				return;
+			}
+			noteProviderRequest(context);
+			providerRequestCounted = false;
 		});
 
 		// omp's InputEvent has no steer/follow-up flag. Its `source` is only

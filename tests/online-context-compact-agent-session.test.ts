@@ -33,7 +33,14 @@ const PROGRESS = {
 	verification: ["tests passed"],
 	decisions: ["kept the implementation small"],
 };
-/** Bytes of work text carried by the plan-completing turn of each phase. */
+/**
+ * Bytes of user-prompt filler that must fall outside the retained tail.
+ * The host cuts at the newest assistant group once that group alone exceeds
+ * `DEFAULT_KEEP_RECENT_TOKENS`, so only messages before that group are
+ * removable. A short prompt archives nothing and the boundary never compacts.
+ */
+const PREFIX_BYTES = 80_000;
+/** Bytes of assistant text that fill the retained tail past the keep budget. */
 const WORK_BYTES = 140_000;
 
 /**
@@ -59,13 +66,13 @@ function phaseWorkText(phase: number): string {
 	return filler(`phase${phase}`, WORK_BYTES);
 }
 
-function step(phase: number, status: "in_progress" | "completed") {
-	return { id: `step-${phase}`, goal: `build phase ${phase}`, status };
+/** User prompt for `phase`: a removable prefix plus the instruction. */
+function phasePrompt(phase: number): string {
+	return `${filler(`prompt${phase}`, PREFIX_BYTES)}\nfinish plan step ${phase}`;
 }
 
-/** Count of update_plan results already executed in the provider-bound context. */
-function executedPlanUpdates(messages: readonly AgentMessage[]): number {
-	return messages.filter((message) => message.role === "toolResult" && message.toolName === "update_plan").length;
+function step(phase: number, status: "in_progress" | "completed") {
+	return { id: `step-${phase}`, goal: `build phase ${phase}`, status };
 }
 
 /**
@@ -117,10 +124,11 @@ function messageText(message: AgentMessage | undefined): string {
  * `willContinue` (already reported, and not retractable) and the model-visible
  * text is asserted for exact content.
  *
- * The script is derived from the provider-bound context rather than a fixed
- * queue, because a boundary compaction rewrites that context mid-run: the
- * executed-count seen by `respond` drops back to the retained tail, which would
- * desynchronize a positional script.
+ * Each `prompt()` is one phase: open the step, complete it, then answer with
+ * text so the agent stops and `session_stop` can compact. A post-compaction
+ * replay sees a rewritten context whose tool results are gone; once the phase
+ * has completed, later calls stay on the final reply so that replay cannot
+ * open the step again.
  *
  * omp specifics this test cannot express through Pi's `DefaultResourceLoader`:
  *
@@ -153,35 +161,37 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 
 	let session: AgentSession | undefined;
 	try {
-		// Each phase runs a plan-open turn, then a plan-completing turn carrying
-		// the work text. Once every phase is scripted, the model answers with a
-		// final reply.
-		const respond = (messages: readonly AgentMessage[]): MockResponse => {
-			const executed = executedPlanUpdates(messages);
-			const phase = Math.floor(executed / 2) + 1;
-			if (phase > phases) {
-				return { content: [{ type: "text", text: `final reply after ${phases} online compactions` }] };
+		// One phase per prompt. `opened`/`completed` reset with the phase so a
+		// compaction that drops tool results cannot look like a fresh plan.
+		let currentPhase = 1;
+		let phaseOpened = false;
+		let phaseCompleted = false;
+		const respond = (_messages: readonly AgentMessage[]): MockResponse => {
+			if (phaseCompleted) {
+				return { content: [{ type: "text", text: `final reply after ${currentPhase} online compactions` }] };
 			}
-			if (executed % 2 === 0) {
+			if (!phaseOpened) {
+				phaseOpened = true;
 				return {
 					content: [
 						{
 							type: "toolCall",
-							id: `plan-open-${phase}`,
+							id: `plan-open-${currentPhase}`,
 							name: "update_plan",
-							arguments: { steps: [step(phase, "in_progress")] },
+							arguments: { steps: [step(currentPhase, "in_progress")] },
 						},
 					],
 				};
 			}
+			phaseCompleted = true;
 			return {
 				content: [
-					{ type: "text", text: phaseWorkText(phase) },
+					{ type: "text", text: phaseWorkText(currentPhase) },
 					{
 						type: "toolCall",
-						id: `plan-done-${phase}`,
+						id: `plan-done-${currentPhase}`,
 						name: "update_plan",
-						arguments: { steps: [step(phase, "completed")], progress: PROGRESS },
+						arguments: { steps: [step(currentPhase, "completed")], progress: PROGRESS },
 					},
 				],
 			};
@@ -213,6 +223,12 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 
 		// Deterministic run: automatic compaction and provider retry are disabled, so
 		// every effect observed below is the extension's own doing.
+		// `tools.xdev` must be off: omp mounts discoverable tools (every extension
+		// tool, by default) under `xd://`, and this scenario calls `update_plan`
+		// directly as a top-level tool.
+		// `compaction.autoContinue` must be off: the extension already resumes via
+		// the stop-hook continuation, and the host's post-compact resume would
+		// start another plan cycle against the summarized context.
 		const settings = await Settings.loadIsolated({
 			cwd,
 			agentDir,
@@ -220,6 +236,8 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 			overrides: {
 				"compaction.enabled": false,
 				"retry.enabled": false,
+				"tools.xdev": false,
+				"compaction.autoContinue": false,
 			},
 		});
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
@@ -291,7 +309,10 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 		expect(session.getAllToolNames()).toContain("update_plan");
 
 		for (let phase = 1; phase <= phases; phase++) {
-			await session.prompt(`finish plan step ${phase}`, { expandPromptTemplates: false });
+			currentPhase = phase;
+			phaseOpened = false;
+			phaseCompleted = false;
+			await session.prompt(phasePrompt(phase), { expandPromptTemplates: false });
 			await session.waitForIdle();
 			// Let this boundary's compaction land before driving the next phase:
 			// the compaction is started from `session_stop` on a later macrotask and
