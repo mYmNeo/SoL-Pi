@@ -311,6 +311,29 @@ describe("Online Context Compact extension", () => {
 		});
 		expect(compactCalls).toEqual([]);
 		expect(pi.sentMessages).toEqual([]);
+		await pi.emitContext(
+			[
+				...buildSessionMessages(),
+				{
+					role: "custom",
+					customType: "session-stop-continuation",
+					content: PENDING_COMPACTION_PLAN_REMINDER,
+					display: false,
+					timestamp: Date.now(),
+				},
+			],
+			context,
+		);
+		await pi.emit(
+			"turn_end",
+			{
+				type: "turn_end",
+				turnIndex: 2,
+				message: assistant("continued"),
+				toolResults: [],
+			},
+			context,
+		);
 		for (const callback of deferredCallbacks.splice(0)) callback();
 		await Promise.resolve();
 		expect(compactCalls).toHaveLength(1);

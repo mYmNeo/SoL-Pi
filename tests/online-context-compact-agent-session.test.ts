@@ -98,31 +98,21 @@ function messageText(message: AgentMessage | undefined): string {
  * The extension does not abort the run to reach that decision. On omp an
  * extension-initiated abort takes the host's aborted fast path, which returns
  * BEFORE the `session_stop` dispatch, so an abort would swallow the very settle
- * hook that starts the compaction. Instead the boundary turn ends naturally,
+ * hook that starts the compaction. Instead the boundary turn ends naturally and
  * `session_stop` returns `{ continue: true, additionalContext:
- * PENDING_COMPACTION_PLAN_REMINDER }`, and the compaction is started on a later
- * macrotask — so it lands AFTER the prompt that selected it has resolved.
+ * PENDING_COMPACTION_PLAN_REMINDER }`. Compaction starts on the macrotask after
+ * the continuation turn's `turn_end`, once that turn's projection included the
+ * reminder — `compact()` aborts a prompt that is still in setup, so starting
+ * any earlier can drop the reminder before the model sees it.
  *
- * Delivery is therefore observed through the host's own receipt rather than
- * through a settle delay: `#emitSessionStopEvent` returns true only when the
- * handler produced a non-empty `additionalContext`, and omp then emits
- * `agent_end` with `willContinue: true` and queues that text as a hidden
- * next-turn message. `willContinue` is exactly "the settle handler's
- * continuation was accepted", it is emitted synchronously with the decision,
- * and it is stable here ([true] for one boundary, [true, true] for two) across
- * repeated runs — unlike the queued hidden turn itself, which the compaction's
- * own abort can delete (see below).
- *
- * The queued hidden turn is where the reminder reaches the model, and the second
- * boundary does not deterministically get one: starting `ctx.compact()` calls
- * `SessionMaintenance.compact()` → `#host.abort()`, and that abort runs
- * `#cancelPostPromptTasks()` and `#clearPendingSessionStopContinuations()`,
- * which delete a still-queued continuation when the abort wins the race against
- * the host's own post-prompt task that prompts it. The abort is unconditional
- * and is the documented cost of compacting mid-settle: it is a property of omp's
- * flow, not of this extension. So the per-boundary count is asserted on
- * `willContinue` (already reported, and not retractable) and the model-visible
- * text is asserted for exact content.
+ * Delivery is observed through the host's own receipt and the model request.
+ * `#emitSessionStopEvent` returns true only when the handler produced a
+ * non-empty `additionalContext`, and omp then emits `agent_end` with
+ * `willContinue: true` and queues that text as a hidden next-turn message.
+ * `willContinue` is exactly "the settle handler's continuation was accepted".
+ * The hidden turn is where the reminder reaches the model; its last message is
+ * that text verbatim. Compaction is deferred until after that turn, so the
+ * host's compact abort cannot delete the queued continuation first.
  *
  * Each `prompt()` is one phase: open the step, complete it, then answer with
  * text so the agent stops and `session_stop` can compact. A post-compaction
@@ -241,7 +231,7 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 			},
 		});
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		authStorage.setRuntimeApiKey(model.provider, `occ-key-${phases}`);
+		authStorage.keys.setRuntime(model.provider, `occ-key-${phases}`);
 		const modelRegistry = new ModelRegistry(authStorage);
 		const sessionManager = SessionManager.inMemory(cwd);
 
@@ -274,9 +264,9 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 		};
 		/**
 		 * Wait for the host's own notification that `count` boundary compactions
-		 * landed. The compaction is started from `session_stop` on a later
-		 * macrotask, so it is still in flight when `prompt()` returns; this waits on
-		 * the notification, never on a duration.
+		 * landed. Compaction starts on a macrotask after the continuation turn, so
+		 * it can still be in flight when `prompt()` returns; this waits on the
+		 * notification, never on a duration.
 		 */
 		const waitForCompactions = async (count: number): Promise<void> => {
 			while (compactionFromExtension.length < count) {
@@ -315,9 +305,9 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 			await session.prompt(phasePrompt(phase), { expandPromptTemplates: false });
 			await session.waitForIdle();
 			// Let this boundary's compaction land before driving the next phase:
-			// the compaction is started from `session_stop` on a later macrotask and
-			// calls `abort()` internally, so prompting into that window would abort
-			// the next prompt instead of reaching its own boundary.
+			// compaction starts after the continuation turn and calls `abort()`
+			// internally, so prompting into that window would abort the next prompt
+			// instead of reaching its own boundary.
 			await waitForCompactions(phase);
 			await session.waitForIdle();
 		}
@@ -377,20 +367,11 @@ async function runBoundaryScenario(phases: 1 | 2): Promise<void> {
 		// The mechanism's own durable counter agrees with the branch.
 		expect(restoreOnlineState(branch).nativeCompactionCount).toBe(phases);
 
-		// The continuation was delivered, once per boundary. This is asserted on
-		// the host's own receipt rather than on a count of provider requests: omp
-		// emits `agent_end` with `willContinue: true` exactly when
-		// `#emitSessionStopEvent` accepted a non-empty `additionalContext`, and
-		// because it is emitted synchronously with that decision it cannot be
-		// retracted afterwards. A regression that stops returning the reminder — or
-		// returns it empty — drops this count below `phases`.
+		// Each accepted continuation reaches a real provider request before the
+		// corresponding compaction. The final developer message is delivered
+		// verbatim, not merely queued by `session_stop`.
 		expect(continuationReceipts.filter(Boolean)).toHaveLength(phases);
-
-		// The reminder's exact text, where the model saw it. The per-boundary count
-		// is already pinned above, so this pins content: the reminder is delivered
-		// verbatim rather than paraphrased or truncated.
-		expect(deliveredContinuations.length).toBeGreaterThanOrEqual(1);
-		expect(deliveredContinuations.every((text) => text === PENDING_COMPACTION_PLAN_REMINDER)).toBe(true);
+		expect(deliveredContinuations).toEqual(Array.from({ length: phases }, () => PENDING_COMPACTION_PLAN_REMINDER));
 
 		// The run ended idle with no extension-load errors.
 		expect(session.isStreaming).toBe(false);
