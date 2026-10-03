@@ -40,13 +40,13 @@ export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE = 1_000;
 export const BOUNDARY_COMPACTION_INSTRUCTIONS =
 	"Preserve completed work, verification results, important decisions, and remaining work.";
-// omp's session_stop handler must return inside a 30 second budget, so the
-// continuation resumes while the boundary compaction is still running. The
-// wording must not claim the rewrite already finished, and it must keep the
-// existing step ids: a freshly keyed completed plan is history, not a new boundary.
+// The continuation must reach the model before native compaction starts.
+// The wording must not claim the rewrite already finished, and it must keep
+// existing step IDs: a freshly keyed completed plan is history, not a new boundary.
 export const PENDING_COMPACTION_PLAN_REMINDER =
-	"Online context compaction is in progress. The parent task is still active. " +
+	"Online context compaction is scheduled. The parent task is still active. " +
 	"Continue the remaining work from the current plan. Preserve existing step IDs when updating progress.";
+
 // The host rejects these before committing a replacement summary, so the current
 // context is still usable. Unknown errors and user cancellation remain distinct.
 const RECOVERABLE_COMPACTION_ERRORS = new Set([
@@ -172,6 +172,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		let observedMessages: readonly AgentMessage[] = [];
 		let pendingBoundary: PendingBoundary | undefined;
 		let selected: SelectedCompaction | undefined;
+		let queuedCompaction: SelectedCompaction | undefined;
+		let continuationProjected = false;
 		let activeDebt: CacheDebt | undefined;
 		let compactionInFlight = false;
 		let compactionRefused = false;
@@ -183,6 +185,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			observedMessages = [];
 			pendingBoundary = undefined;
 			selected = undefined;
+			queuedCompaction = undefined;
+			continuationProjected = false;
 			activeDebt = undefined;
 			compactionInFlight = false;
 			compactionRefused = false;
@@ -306,6 +310,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			ensureRestored(context);
 			observedMessages = [...event.messages];
 			noteProviderRequest(context);
+			if (queuedCompaction && event.messages.some((message) =>
+				message.role === "custom" &&
+				message.customType === "session-stop-continuation" &&
+				message.content === PENDING_COMPACTION_PLAN_REMINDER,
+			)) continuationProjected = true;
 		});
 
 		pi.on("before_provider_request", (_event, context) => {
@@ -342,6 +351,16 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("turn_end", (event, context) => {
+			// omp 18.8.0's compact() aborts the live prompt and drops one that is
+			// still in setup, before the model sees it. Wait until this turn's
+			// projection included the reminder, then start on the next macrotask
+			// so the abort cannot discard the continuation that was just admitted.
+			if (continuationProjected && queuedCompaction) {
+				continuationProjected = false;
+				const pending = queuedCompaction;
+				queuedCompaction = undefined;
+				context.setTimeout(() => startBoundaryCompaction(context, pending), 0);
+			}
 			// Plan chatter cannot make a rejected compact feasible. Require actual
 			// tool work or new user input before attempting another boundary.
 			if (event.toolResults.some((item) => item.toolName !== "update_plan" && !item.isError)) compactionRefused = false;
@@ -412,11 +431,13 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		// omp's settle/continuation hook, and the only continuation-capable event
 		// on this host. Returning `{ continue: true, additionalContext }` IS the
 		// resume mechanism, so this path must NOT also call pi.sendMessage.
-		// The handler also must not await the compaction: omp caps every
+		// The handler also must not await or schedule compaction: omp caps every
 		// non-shutdown handler at 30 seconds and discards an overrun handler's
-		// result, and compact() aborts synchronously, which would discard the
-		// continuation if it ran inline.
-		pi.on("session_stop", (_event, context) => {
+		// result, and compact() aborts synchronously. On omp 18.8.0 that abort
+		// drops a continuation prompt that is still in setup, so the reminder
+		// never reaches the model. Compaction starts from the continuation
+		// turn's `turn_end` instead.
+		pi.on("session_stop", () => {
 			const pending = selected;
 			selected = undefined;
 			if (!pending || compactionInFlight) return undefined;
@@ -426,7 +447,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				repaymentTokens: Math.max(0, pending.decision.archiveTokens - pending.decision.memoTokens),
 			};
 			compactionInFlight = true;
-			context.setTimeout(() => startBoundaryCompaction(context, pending), 0);
+			queuedCompaction = pending;
+			continuationProjected = false;
 			return { continue: true, additionalContext: PENDING_COMPACTION_PLAN_REMINDER };
 		});
 
@@ -440,6 +462,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			save();
 			pendingBoundary = undefined;
 			selected = undefined;
+			queuedCompaction = undefined;
+			continuationProjected = false;
 			activeDebt = undefined;
 			observedMessages = [];
 		});
@@ -447,6 +471,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		pi.on("session_shutdown", () => {
 			pendingBoundary = undefined;
 			selected = undefined;
+			queuedCompaction = undefined;
+			continuationProjected = false;
 			activeDebt = undefined;
 			compactionInFlight = false;
 		});
