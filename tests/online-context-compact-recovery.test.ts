@@ -105,6 +105,28 @@ async function scenario(error?: Error, unrelatedCompactionAfterError = false) {
 			stop_hook_active: false,
 			signal: new AbortController().signal,
 		}, ctx);
+		// The host delivers the reminder on the next turn. Compaction waits until
+		// that projection exists, then starts on the macrotask after `turn_end`.
+		if (result && typeof result === "object" && "continue" in result && result.continue === true) {
+			await pi.emitContext(
+				[
+					...messages,
+					{
+						role: "custom",
+						customType: "session-stop-continuation",
+						content: PENDING_COMPACTION_PLAN_REMINDER,
+						display: false,
+						timestamp: Date.now(),
+					},
+				],
+				ctx,
+			);
+			await pi.emit(
+				"turn_end",
+				{ message: assistant("continued"), toolResults: [] },
+				ctx,
+			);
+		}
 		for (const callback of deferred.splice(0)) callback();
 		await Promise.resolve();
 		return result;
