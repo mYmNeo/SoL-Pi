@@ -32,7 +32,7 @@ import { DEFAULT_CONFIG } from "../src/sol-pi/config.ts";
  *    extension loaded but registered nothing.
  *  - The mock provider only resolves through the custom-API registry, so
  *    `registerMockApi()` must run before the session is built, and the model
- *    still needs a resolved credential (`AuthStorage` + `setRuntimeApiKey`).
+ *    still needs a resolved credential (`AuthStorage.keys.setRuntime`).
  *  - Settings come from an isolated in-memory instance pinned to the temp
  *    `cwd`/`agentDir`; nothing is read from or written to the real agent dir.
  */
@@ -93,7 +93,7 @@ it("loads the package entrypoint and executes fused tools in an all-enabled sess
 			],
 		});
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		authStorage.setRuntimeApiKey(model.provider, "package-integration-key");
+		authStorage.keys.setRuntime(model.provider, "package-integration-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const sessionManager = SessionManager.create(cwd, join(agentDir, "sessions"));
 
