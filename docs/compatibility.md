@@ -1,6 +1,6 @@
 # oh-my-pi Compatibility
 
-SoL-Pi is developed and tested against `omp` 18.4.12, distributed as `@oh-my-pi/pi-coding-agent@18.4.12` and its sibling `@oh-my-pi/*` packages. Every mechanism is a standalone extension loaded through oh-my-pi's public extension APIs; upstream Pi is no longer a supported host. There is no dual-host mode, no compatibility shim for Pi, and no Pi specifier anywhere in `src/`.
+SoL-Pi is developed and tested against `omp` 18.5.0, distributed as `@oh-my-pi/pi-coding-agent@18.5.0` and its sibling `@oh-my-pi/*` packages. Every mechanism is a standalone extension loaded through oh-my-pi's public extension APIs; upstream Pi is no longer a supported host. There is no dual-host mode, no compatibility shim for Pi, and no Pi specifier anywhere in `src/`.
 
 SoL-Pi imports only public package exports:
 
