@@ -351,7 +351,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("turn_end", (event, context) => {
-			// omp 18.8.0's compact() aborts the live prompt and drops one that is
+			// omp 18.8.6's compact() aborts the live prompt and drops one that is
 			// still in setup, before the model sees it. Wait until this turn's
 			// projection included the reminder, then start on the next macrotask
 			// so the abort cannot discard the continuation that was just admitted.
@@ -433,7 +433,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		// resume mechanism, so this path must NOT also call pi.sendMessage.
 		// The handler also must not await or schedule compaction: omp caps every
 		// non-shutdown handler at 30 seconds and discards an overrun handler's
-		// result, and compact() aborts synchronously. On omp 18.8.0 that abort
+		// result, and compact() aborts synchronously. On omp 18.8.6 that abort
 		// drops a continuation prompt that is still in setup, so the reminder
 		// never reaches the model. Compaction starts from the continuation
 		// turn's `turn_end` instead.
