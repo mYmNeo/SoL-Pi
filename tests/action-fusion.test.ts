@@ -305,6 +305,25 @@ describe("action fusion then_run", () => {
 		expect(await readFile(filePath, "utf8")).toBe("keep me\n");
 	});
 
+	it("returns an error result when the host bash reports a non-zero exit without throwing", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "kept.txt");
+		const { write } = loadFusedTools();
+
+		const result = await write.execute(
+			"write-host-fail",
+			{ path: filePath, content: "keep me\n", then_run: { command: "exit 7" } },
+			undefined,
+			undefined,
+			createContext(dir),
+		);
+
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain("[then_run:failed]");
+		expect(text(result)).not.toContain("[then_run:succeeded]");
+		expect(await readFile(filePath, "utf8")).toBe("keep me\n");
+	});
+
 	it("skips then_run and reports it when the mutation fails", async () => {
 		const dir = await createTempDir();
 		const filePath = join(dir, "rejected.txt");

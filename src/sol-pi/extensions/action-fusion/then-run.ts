@@ -130,20 +130,36 @@ export async function executeMutationThenRun<TDetails>({
 			await assertUnchangedBeforeCommand(path);
 		}
 		const bash = createBashToolDefinition(ctx.cwd, bashOptions);
+		let bashResult: AgentToolResult<unknown>;
 		try {
-			const bashResult = await bash.execute(`${toolCallId}:then_run`, thenRun, signal, undefined, ctx);
-			const output = resultText(bashResult);
-			return {
-				...mutationResult,
-				content: [
-					...mutationResult.content,
-					{ type: "text", text: output ? `${THEN_RUN_SUCCEEDED}\n${output}` : THEN_RUN_SUCCEEDED },
-				],
-			};
+			bashResult = await bash.execute(`${toolCallId}:then_run`, thenRun, signal, undefined, ctx);
 		} catch (error) {
+			// The legacy operations seam throws on a non-zero exit. A timeout, an
+			// abort, or a missing exit status throws too. Keep the mutation output.
 			const mutationOutput = resultText(mutationResult);
 			throw new Error([mutationOutput, THEN_RUN_FAILED, errorText(error)].filter(Boolean).join("\n\n"));
 		}
+		const output = resultText(bashResult);
+		// The host bash tool reports a finished non-zero exit as `isError` instead
+		// of throwing. Return that as an error result so the edit diff still
+		// renders, and do not stamp the command as succeeded.
+		if (bashResult.isError === true) {
+			return {
+				...mutationResult,
+				isError: true,
+				content: [
+					...mutationResult.content,
+					{ type: "text", text: output ? `${THEN_RUN_FAILED}\n${output}` : THEN_RUN_FAILED },
+				],
+			};
+		}
+		return {
+			...mutationResult,
+			content: [
+				...mutationResult.content,
+				{ type: "text", text: output ? `${THEN_RUN_SUCCEEDED}\n${output}` : THEN_RUN_SUCCEEDED },
+			],
+		};
 	};
 
 	// Without a target there is nothing to serialize against: the queue exists to

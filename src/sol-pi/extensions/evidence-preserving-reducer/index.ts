@@ -65,6 +65,18 @@ export async function reduceToolResult(
 	if (!reducible || !DIAGNOSTIC_COMMAND.test(reducible.command)) return undefined;
 	const { body, command } = reducible;
 	if (Buffer.byteLength(body, "utf8") < config.minBytes) return undefined;
+	// The receipt status follows `isError`. When the result's own text disagrees
+	// (a non-zero exit or a failed then_run reported as success, or the reverse),
+	// leave the original output in place rather than certify the wrong status.
+	if (reducible.exitFailed !== undefined && reducible.exitFailed !== event.isError) {
+		journal("fallback", {
+			toolCallId: event.toolCallId,
+			reason: "exit-state-mismatch",
+			isError: event.isError,
+			exitFailed: reducible.exitFailed,
+		});
+		return undefined;
+	}
 	if (body.length > config.maxChars) {
 		journal("fallback", { reason: "source-over-max-chars", sourceChars: body.length, maxChars: config.maxChars });
 		return undefined;
