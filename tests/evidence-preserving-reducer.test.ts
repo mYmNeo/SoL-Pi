@@ -491,6 +491,71 @@ describe("evidence-preserving reducer", () => {
 		},
 	);
 
+	it.each([
+		{
+			name: "a fused then_run that exited non-zero reported as succeeded",
+			event: (body: string) => ({
+				...fusedEvent(body, false),
+				content: [
+					{ type: "text", text: "Successfully wrote 12 bytes to target.ts" },
+					{ type: "text", text: `[then_run:succeeded]\n${body}\n\nCommand exited with code 7` },
+				],
+			}),
+		},
+		{
+			name: "a fused [then_run:failed] result without isError",
+			event: (body: string) => ({ ...fusedEvent(body, true), isError: false }),
+		},
+		{
+			name: "a fused [then_run:succeeded] result with isError",
+			event: (body: string) => ({ ...fusedEvent(body, false), isError: true }),
+		},
+		{
+			name: "a bash result whose details.exitCode is non-zero without isError",
+			event: (body: string) => bashEvent(body, { isError: false, details: { exitCode: 2 } }),
+		},
+		{
+			name: "a bash result whose inline status line is non-zero without isError",
+			event: (body: string) => bashEvent(`${body}\n\nCommand exited with code 2`, { isError: false }),
+		},
+	])("skips $name and journals exit-state-mismatch", async ({ event }) => {
+		const root = await storeRoot();
+		scriptReducerFailure(new Error("unexpected model call"));
+		const { context, manager, pi } = load(root);
+		const body = `ERROR test target failed\n${"diagnostic output\n".repeat(400)}`;
+
+		expect(await pi.emit("tool_result", event(body) as ToolResultEvent, context)).toBeUndefined();
+		expect(REDUCER_MODEL.calls).toHaveLength(0);
+		expect(manager.customEntryData()).toEqual([
+			expect.objectContaining({ kind: "fallback", reason: "exit-state-mismatch" }),
+		]);
+	});
+
+	it("checks the exit status on the inline text before reading the full-output file", async () => {
+		const root = await storeRoot();
+		const fullBody = `ERROR full output\n${"full diagnostic\n".repeat(400)}`;
+		const outputPath = join(tmpdir(), `pi-bash-${randomUUID()}.log`);
+		await writeFile(outputPath, fullBody, { mode: 0o600 });
+		cleanupPaths.push(outputPath);
+		scriptReducerFailure(new Error("unexpected model call"));
+		const { context, manager, pi } = load(root);
+		const inline = `full diagnostic\n\n[Showing lines 2-401 of 401. Full output: ${outputPath}]\n\nCommand exited with code 7`;
+		const event = {
+			...fusedEvent("", false),
+			content: [
+				{ type: "text", text: "Successfully wrote 12 bytes to target.ts" },
+				{ type: "text", text: `[then_run:succeeded]\n${inline}` },
+			],
+			details: { fullOutputPath: outputPath },
+		} as ToolResultEvent;
+
+		expect(await pi.emit("tool_result", event, context)).toBeUndefined();
+		expect(REDUCER_MODEL.calls).toHaveLength(0);
+		expect(manager.customEntryData()).toContainEqual(
+			expect.objectContaining({ kind: "fallback", reason: "exit-state-mismatch" }),
+		);
+	});
+
 	it.each(["invented", "model-error"] as const)("fails open on %s", async (mode) => {
 		const root = await storeRoot();
 		const body = `ERROR real failure\n${"x".repeat(5000)}`;
